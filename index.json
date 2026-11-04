@@ -1,0 +1,77 @@
+{
+  "format": 1,
+  "mods": [
+    {
+      "folder": "colors-bubblegum",
+      "file": "colors-bubblegum.capri-mod",
+      "name": "Colors: Bubblegum",
+      "kind": "settings",
+      "author": "Vocyn",
+      "about": "A Bubblegum colour set for her: pink hair, cyan accents, violet eyes, white edges and a plum body. Works with skins too."
+    },
+    {
+      "folder": "colors-cyber-cyan",
+      "file": "colors-cyber-cyan.capri-mod",
+      "name": "Colors: Cyber Cyan",
+      "kind": "settings",
+      "author": "Vocyn",
+      "about": "A Cyber Cyan colour set for her: cyan hair, magenta accents, yellow eyes and violet edges. Her body keeps its usual colour. Works with skins too."
+    },
+    {
+      "folder": "colors-royal",
+      "file": "colors-royal.capri-mod",
+      "name": "Colors: Royal",
+      "kind": "settings",
+      "author": "Vocyn",
+      "about": "A Royal colour set for her: purple hair, gold accents, sky-blue eyes, pink edges and a midnight body. Works with skins too."
+    },
+    {
+      "folder": "colors-toxic",
+      "file": "colors-toxic.capri-mod",
+      "name": "Colors: Toxic",
+      "kind": "settings",
+      "author": "Vocyn",
+      "about": "A Toxic colour set for her: acid-green hair, red accents, cyan eyes, green edges and a deep green body. Works with skins too."
+    },
+    {
+      "folder": "custom-names",
+      "file": "custom-names.capri-mod",
+      "name": "Custom Names",
+      "kind": "settings",
+      "author": "Vocyn",
+      "about": "Capri answers to more names: Nova, Big Z and Capricorn. She still answers to Capri too."
+    },
+    {
+      "folder": "hearing-log",
+      "file": "hearing-log.capri-mod",
+      "name": "Hearing Log",
+      "kind": "settings",
+      "author": "Vocyn",
+      "about": "While it's on, she keeps a list on your PC of what her ears heard and whether it counted as talking to her. Handy when she isn't answering to her name. Removing the mod deletes the list."
+    },
+    {
+      "folder": "hello-code",
+      "file": "hello-code.capri-code",
+      "name": "Hello Code",
+      "kind": "code",
+      "author": "Vocyn",
+      "about": "A tiny code mod to learn from. Say \"mod check\" and she answers and counts how many times you've asked."
+    },
+    {
+      "folder": "sharper-ears",
+      "file": "sharper-ears.capri-mod",
+      "name": "Sharper Ears",
+      "kind": "settings",
+      "author": "Vocyn",
+      "about": "She answers to words that sound like her name, not only exact spellings, like Caprice, Capris or Cah Pree."
+    },
+    {
+      "folder": "startup-intros",
+      "file": "startup-intros.capri-code",
+      "name": "Startup Intros",
+      "kind": "code",
+      "author": "Vocyn",
+      "about": "Three start-up animations: Hijack, Shatter and Wake. She shuffles them each time she starts, or you pick one."
+    }
+  ]
+}
