@@ -14,7 +14,7 @@ Capri's Mods tab, coming in a future update, imports these files and installs th
 
 ## Sharing a mod
 1. Fork this repo.
-2. Add a folder under `mods/` named after your mod. Put in the mod file and a short `README.md` that says what it does and who made it. If the mod changes how she looks, add a screenshot.
+2. Add a folder under `mods/` named after your mod. Put in the mod file, a short `README.md` that says what it does and who made it, and a picture called `preview.png`, around 16:9. That picture is what people see in Capri's mods window.
 3. Open a pull request.
 
 ## Stay safe
