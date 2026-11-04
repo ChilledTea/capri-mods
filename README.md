@@ -10,7 +10,7 @@ Every mod is checked for malware before it goes up here.
 - **Skins** (`.capri-skin`): a zip of pictures that replace her art.
 
 ## Using a mod
-Capri's Mods tab, coming in a future update, imports these files and installs them.
+In Capri 0.8.3 or newer, open Capri Mainframe and press Mods in the CAPRI band. Browse mods lists everything here with previews, downloads and ratings, and Install puts a mod in and turns it on. You can also download a mod file from here and use Import mod.
 
 ## Sharing a mod
 1. Fork this repo.
