@@ -21,4 +21,4 @@ In Capri 0.8.3 or newer, open Capri Mainframe and press Mods in the CAPRI band. 
 - Only install mods from here, or from people you trust.
 - Only get Capri itself from [capriai.app](https://capriai.app) or [its GitHub](https://github.com/lachydotmcg/capri-desktop/releases).
 
-Questions? Ask on the [Capri Discord](https://discord.gg/F4fDHfGtFk).
+Questions? Ask on the [Capri Discord](https://discord.gg/capridesktop).
