@@ -2,7 +2,7 @@ import json, os, re
 
 here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 root = os.path.join(here, 'mods')
-kinds = {'.capri-mod': 'settings', '.capri-code': 'code', '.capri-skin': 'skin'}
+kinds = {'.capri-mod': 'settings', '.capri-code': 'code', '.capri-skin': 'skin', '.capri-skill': 'skill'}
 mods = []
 for folder in sorted(os.listdir(root)):
     path = os.path.join(root, folder)

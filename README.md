@@ -8,6 +8,7 @@ Every mod is checked for malware before it goes up here.
 - **Settings mods** (`.capri-mod`): extra names, colours and other settings.
 - **Code mods** (`.capri-code`): C# that Capri compiles and runs. Code mods can do anything on your PC, so Capri asks before running one.
 - **Skins** (`.capri-skin`): a zip of pictures that replace her art.
+- **Skills** (`.capri-skill`): know-how for a game, like what to build and when. Capri follows it whenever she plays that game. Skills need Capri 0.8.4 or newer.
 
 ## Using a mod
 In Capri 0.8.3 or newer, open Capri Mainframe and press Mods in the CAPRI band. Browse mods lists everything here with previews, downloads and ratings, and Install puts a mod in and turns it on. You can also download a mod file from here and use Import mod.
