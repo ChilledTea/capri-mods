@@ -66,6 +66,14 @@
       "about": "A tiny code mod to learn from. Say \"mod check\" and she answers and counts how many times you've asked."
     },
     {
+      "folder": "maid-suit",
+      "file": "maid-suit.capri-skin",
+      "name": "Maid Suit",
+      "kind": "skin",
+      "author": "Vocyn",
+      "about": "A skin for Capri: a maid suit, for you weirdos."
+    },
+    {
       "folder": "sharper-ears",
       "file": "sharper-ears.capri-mod",
       "name": "Sharper Ears",
