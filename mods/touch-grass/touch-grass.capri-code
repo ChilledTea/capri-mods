@@ -1,0 +1,470 @@
+// capri-mod: 1
+// id: touch-grass
+// name: Touch Grass
+// version: 1.0.0
+// author: Issei
+// description: Counts your gaming time and roasts you when it is time for a break.
+
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.RegularExpressions;
+using CapriDesktop;
+
+// Every 30 seconds it looks at the windows on screen and counts the ones whose program lives in a game library:
+// Steam, Epic, Riot, Xbox, GOG, Ubisoft and EA folders, plus a few well-known games outside them. Playtime stays in
+// this mod's own folder, a line per game per day, and anything older than five weeks is dropped.
+public class TouchGrass : ICapriMod
+{
+    // The harness fills these in to test without a clock or real games.
+    public Func<DateTime> Clock;
+    public Func<List<string>> Games;
+
+    private const RegexOptions Plain = RegexOptions.IgnoreCase | RegexOptions.CultureInvariant;
+    private const double BreakMinutes = 15, LongestStep = 2, KeepDays = 35;
+    private static readonly Regex Wake = new Regex(@"^\s*(?:(?:hey|hi|ok|okay|yo|oi)[\s,]+)?capri\b[\s,.:;!?-]*|[\s,]+capri[\s.!?]*$", Plain);
+    private static readonly Regex HowLong = new Regex(@"\bhow\s+(?:long|much)\b.*\b(?:play(?:ed|ing)?|gam(?:ed|ing))\b|\bplay\s*time\b|\bscreen\s*time\b.*\bgam", Plain);
+    private static readonly Regex Week = new Regex(@"\b(?:this|the|last|past)\s+week\b|\bweekly\b|\b7\s+days\b|\bseven\s+days\b", Plain);
+    private static readonly Regex Touched = new Regex(@"\bi\s+(?:just\s+)?(?:touched|went\s+and\s+touched)\s+(?:some\s+)?grass\b|\bi\s+(?:just\s+)?(?:went|been|was)\s+outside\b|\bi\s+took\s+a\s+break\b", Plain);
+    private static readonly Regex Setting = new Regex(@"\btouch\s+grass\b.*\b(?:after|every|at)\b|\b(?:remind|tell|roast)\s+me\b.*\bgrass\b.*\b(?:after|every)\b", Plain);
+    private static readonly Regex Quiet = new Regex(@"\b(?:stop|pause|mute|quiet|turn\s+off|disable|no\s+more)\b.*\b(?:touch\s+grass|grass\s+(?:reminders?|roasts?))\b|\btouch\s+grass\s+(?:off|pause)\b", Plain);
+    private static readonly Regex Loud = new Regex(@"\b(?:start|resume|unmute|turn\s+on|enable)\b.*\b(?:touch\s+grass|grass\s+(?:reminders?|roasts?))\b|\btouch\s+grass\s+on\b", Plain);
+    private static readonly Regex Status = new Regex(@"\btouch\s+grass\s+(?:status|settings)\b|\bwhat\s+games\s+(?:are\s+you|do\s+you)\s+(?:tracking|counting|see)\b", Plain);
+    private static readonly Regex Ignore = new Regex(@"^(?:please\s+)?(?:don'?t|stop|quit)\s+(?:count|track)(?:ing)?\s+(.+?)$|^(.+?)\s+(?:isn'?t|is\s+not|ain'?t)\s+a\s+game$", Plain);
+    private static readonly Regex Unignore = new Regex(@"^(?:please\s+)?(?:count|track)\s+(.+?)\s+again$|^(.+?)\s+is\s+a\s+game(?:\s+after\s+all)?$", Plain);
+
+    private static readonly string[] Roasts =
+    {
+        "{1} of {0}. Go touch grass. I'll guard your save file.",
+        "{1} of {0}. Your chair has a you-shaped dent now. Stand up. Stretch. Drink water.",
+        "{1}. I'm not mad, I'm impressed. And a little worried. Grass. Outside. Now.",
+        "{1} of {0}. At this point the grass is touching you.",
+        "Still going? {1}. I'm telling your mum."
+    };
+
+    // Game libraries: the folder after one of these is the game's name.
+    private static readonly string[] Libraries = { @"\steamapps\common\", @"\epic games\", @"\riot games\", @"\xboxgames\", @"\gog galaxy\games\", @"\ubisoft game launcher\games\", @"\ea games\", @"\origin games\", @"\battle.net\games\" };
+    // Folders inside those libraries that are launchers or tools, not games.
+    // Steam sells plenty of apps that sit open all day and aren't play, desktop pets included.
+    private static readonly string[] NotGames =
+    {
+        "steamworks shared", "wallpaper_engine", "wallpaper engine", "riot client", "launcher", "epic online services", "directx", "steamvr",
+        "steam controller configs", "common redist", "redist", "ubisoft connect", "ea app", "gog galaxy", "desktop mate", "bongo cat",
+        "obs studio", "lossless scaling", "vtube studio", "vseeface", "soundpad", "blender", "aseprite", "krita", "rpg maker mv", "rpg maker mz",
+        "fpsvr", "ovr advanced settings", "ovr toolkit", "xsoverlay", "virtual desktop streamer", "spirit city lofi sessions", "voicemeeter", "steam link"
+    };
+    private static readonly string[] HelperExes = { "unitycrashhandler64", "unitycrashhandler32", "crashreportclient", "crashpad_handler", "easyanticheat", "easyanticheat_eos", "beservice", "launcher", "uninstall", "unins000", "vc_redist.x64", "dxsetup", "cefsharp.browsersubprocess", "steamwebhelper", "riotclientservices", "riotclientux" };
+    // Well-known games that don't live in a library folder: program name, then the name she uses.
+    private static readonly string[,] Known =
+    {
+        { "minecraft.windows", "Minecraft" }, { "robloxplayerbeta", "Roblox" }, { "osu!", "osu!" }, { "overwatch", "Overwatch" },
+        { "wow", "World of Warcraft" }, { "diablo iv", "Diablo IV" }, { "hearthstone", "Hearthstone" }, { "league of legends", "League of Legends" },
+        { "valorant-win64-shipping", "VALORANT" }, { "genshinimpact", "Genshin Impact" }, { "starrail", "Honkai: Star Rail" }, { "zenlesszonezero", "Zenless Zone Zero" }
+    };
+
+    private readonly object gate = new object();
+    private ICapriHost capri;
+    private System.Threading.Timer beat;
+    private string playFile, settingsFile, ignoreFile;
+    private readonly Dictionary<string, double> seconds = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);   // "yyyy-MM-dd\tGame"
+    private readonly HashSet<string> ignored = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    private List<string> playing = new List<string>();
+    private DateTime lastTick, lastPlayed, lastSaved;
+    private double session;            // minutes in this sitting, with breaks under 15 minutes not ending it
+    private int nagged;                // how many roasts this sitting
+    private double every = 120;        // minutes
+    private bool quiet;
+    private bool started;
+
+    public void Start(ICapriHost host)
+    {
+        capri = host;
+        playFile = Path.Combine(host.Folder, "playtime.txt");
+        settingsFile = Path.Combine(host.Folder, "settings.txt");
+        ignoreFile = Path.Combine(host.Folder, "not-games.txt");
+        if (Games == null) Games = Scan;
+        bool real = Clock == null;
+        if (real) Clock = delegate { return DateTime.Now; };
+        Load();
+        lastTick = lastSaved = Clock();
+        started = true;
+        if (real) beat = new System.Threading.Timer(delegate { Tick(); }, null, 5000, 30000);
+    }
+
+    public void Stop()
+    {
+        if (beat != null) beat.Dispose();
+        beat = null;
+        lock (gate) if (started) SavePlay();
+    }
+
+    // Called every 30 seconds for real, or every fake minute by the harness.
+    public void Tick()
+    {
+        List<string> found;
+        try { found = Games(); }
+        catch (Exception error) { capri.Log("Couldn't look for games: " + error.Message); return; }
+        string say = null;
+        lock (gate)
+        {
+            DateTime now = Clock();
+            // A long gap is the PC asleep or Capri closed, not play, so a step counts for at most two minutes.
+            double step = Math.Max(0, Math.Min(LongestStep, (now - lastTick).TotalMinutes));
+            lastTick = now;
+            playing = found.FindAll(game => !ignored.Contains(game));
+            if (playing.Count == 0)
+            {
+                if ((now - lastSaved).TotalMinutes >= 5) SavePlay();
+                return;
+            }
+            if ((now - lastPlayed).TotalMinutes > BreakMinutes) { session = 0; nagged = 0; }
+            lastPlayed = now;
+            session += step;
+            string day = now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+            foreach (string game in playing)
+            {
+                string key = day + "\t" + game;
+                double had;
+                seconds.TryGetValue(key, out had);
+                seconds[key] = had + step * 60;
+            }
+            if (!quiet && session >= every * (nagged + 1))
+            {
+                say = string.Format(Roasts[Math.Min(nagged, Roasts.Length - 1)], playing[0], Spoken(session));
+                nagged++;
+            }
+            if ((now - lastSaved).TotalMinutes >= 1) SavePlay();
+        }
+        if (say != null) capri.Say(say);
+    }
+
+    public bool Heard(string words)
+    {
+        string said = Wake.Replace((words ?? "").Trim(), "").Trim().TrimEnd('.', '!', '?');
+        if (said.Length == 0) return false;
+        string reply;
+        lock (gate) reply = Answer(said);
+        if (reply == null) return false;
+        capri.Say(reply);
+        return true;
+    }
+
+    private string Answer(string said)
+    {
+        DateTime now = Clock();
+        if (Quiet.IsMatch(said))
+        {
+            quiet = true;
+            SaveSettings();
+            return "Fine. I'll keep counting, I just won't say anything. Your spine is on its own.";
+        }
+        if (Loud.IsMatch(said))
+        {
+            quiet = false;
+            SaveSettings();
+            return "Touch grass reminders are back on. Every " + Spoken(every) + " of gaming.";
+        }
+        if (Setting.IsMatch(said))
+        {
+            double minutes = Minutes(Numbers(said.ToLowerInvariant()));
+            if (minutes < 0) return "After how long? Say something like: touch grass after 90 minutes.";
+            if (minutes < 15) return "Less than fifteen minutes? Even I'm not that mean. Fifteen is the least.";
+            if (minutes > 12 * 60) return "Twelve hours is the most. If you're playing longer than that, we need to talk.";
+            every = minutes;
+            quiet = false;
+            SaveSettings();
+            return "Okay. I'll roast you after " + Spoken(every) + " of gaming, and again every " + Spoken(every) + " after that.";
+        }
+        if (Touched.IsMatch(said))
+        {
+            session = 0;
+            nagged = 0;
+            lastPlayed = DateTime.MinValue;
+            return "Proud of you. Did it feel weird? The sun's real, by the way. Sitting reset.";
+        }
+        if (Status.IsMatch(said))
+        {
+            string games = playing.Count == 0 ? "I don't see a game running right now." : "I see " + Joined(playing) + " running.";
+            return games + (quiet ? " Reminders are off." : " I roast you every " + Spoken(every) + " of gaming.") + (ignored.Count > 0 ? " Not counting " + Joined(new List<string>(ignored)) + "." : "");
+        }
+        Match ignore = Ignore.Match(said);
+        if (ignore.Success)
+        {
+            string name = Known_(ignore.Groups[1].Success ? ignore.Groups[1].Value : ignore.Groups[2].Value);
+            if (name == null) return null;
+            ignored.Add(name);
+            playing.Remove(name);
+            SaveIgnored();
+            return "Okay, I won't count " + name + " as gaming.";
+        }
+        Match unignore = Unignore.Match(said);
+        if (unignore.Success)
+        {
+            string asked = (unignore.Groups[1].Success ? unignore.Groups[1].Value : unignore.Groups[2].Value).Trim();
+            string name = null;
+            foreach (string known in ignored) if (Same(known, asked)) name = known;
+            if (name == null) return null;
+            ignored.Remove(name);
+            SaveIgnored();
+            return "Okay, " + name + " counts as gaming again.";
+        }
+        if (HowLong.IsMatch(said)) return Week.IsMatch(said) ? WeekReport(now) : TodayReport(now);
+        return null;
+    }
+
+    // The game they named, matched against games she's seen, or null when it isn't one of them.
+    private string Known_(string asked)
+    {
+        asked = Regex.Replace(asked.Trim(), @"^(?:the\s+)?(?:game\s+)?", "", Plain).Trim();
+        if (Regex.IsMatch(asked, @"^(?:it|this|that|this\s+one|that\s+one)$", Plain)) return playing.Count > 0 ? playing[0] : null;
+        foreach (string game in playing) if (Same(game, asked)) return game;
+        foreach (string key in seconds.Keys)
+        {
+            string game = key.Substring(key.IndexOf('\t') + 1);
+            if (Same(game, asked)) return game;
+        }
+        return null;
+    }
+
+    private static bool Same(string game, string asked)
+    {
+        string a = Plainly(game), b = Plainly(asked);
+        return b.Length >= 3 && (a == b || a.Contains(b) || b.Contains(a) && a.Length >= 3);
+    }
+
+    private static string Plainly(string name) { return Regex.Replace((name ?? "").ToLowerInvariant(), @"[^\p{L}\p{N}]+", ""); }
+
+    private string TodayReport(DateTime now)
+    {
+        Dictionary<string, double> today = Totals(now.Date, now.Date);
+        double total = 0;
+        foreach (double value in today.Values) total += value;
+        if (total < 60) return "You haven't gamed today. Who are you and what did you do with my gremlin?";
+        string top = Top(today, 3);
+        string sitting = playing.Count > 0 && session >= 1 ? " This sitting: " + Spoken(session) + "." : "";
+        return "Today: " + Spoken(total / 60) + ". " + top + sitting + (total / 60 >= every * 2 ? " Grass misses you." : "");
+    }
+
+    private string WeekReport(DateTime now)
+    {
+        Dictionary<string, double> week = Totals(now.Date.AddDays(-6), now.Date);
+        double total = 0;
+        foreach (double value in week.Values) total += value;
+        if (total < 60) return "Barely any gaming in the last seven days. Are you okay?";
+        double perDay = total / 60 / 7;   // minutes a day
+        string verdict = perDay >= 6 * 60 ? " That's a part-time job. Do they pay you?" : perDay >= 3 * 60 ? " About " + Spoken(perDay) + " a day. Respectable. Concerning, but respectable." : " Honestly? Healthy. Boring, but healthy.";
+        return "Last seven days: " + Spoken(total / 60) + ". " + Top(week, 3) + verdict;
+    }
+
+    private Dictionary<string, double> Totals(DateTime from, DateTime to)
+    {
+        Dictionary<string, double> totals = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+        foreach (KeyValuePair<string, double> entry in seconds)
+        {
+            int tab = entry.Key.IndexOf('\t');
+            DateTime day;
+            if (!DateTime.TryParseExact(entry.Key.Substring(0, tab), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out day) || day < from || day > to) continue;
+            string game = entry.Key.Substring(tab + 1);
+            if (ignored.Contains(game)) continue;
+            double had;
+            totals.TryGetValue(game, out had);
+            totals[game] = had + entry.Value;
+        }
+        return totals;
+    }
+
+    private static string Top(Dictionary<string, double> totals, int most)
+    {
+        List<KeyValuePair<string, double>> sorted = new List<KeyValuePair<string, double>>(totals);
+        sorted.Sort((a, b) => b.Value.CompareTo(a.Value));
+        List<string> parts = new List<string>();
+        foreach (KeyValuePair<string, double> entry in sorted)
+        {
+            if (parts.Count == most || entry.Value < 60) break;
+            parts.Add(entry.Key + " " + Spoken(entry.Value / 60));
+        }
+        return parts.Count == 0 ? "" : "Most of it " + Joined(parts) + ".";
+    }
+
+    // ---- Finding games ----
+
+    private delegate bool WindowVisitor(IntPtr window, IntPtr data);
+    [DllImport("user32.dll")] private static extern bool EnumWindows(WindowVisitor visit, IntPtr data);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr window, StringBuilder text, int most);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr OpenProcess(uint access, bool inherit, uint id);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)] private static extern bool QueryFullProcessImageName(IntPtr process, uint flags, StringBuilder name, ref uint size);
+    [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
+    private const uint QueryLimited = 0x1000;
+
+    // The games with a visible window right now. Only reads program paths and window titles, nothing inside them.
+    private List<string> Scan()
+    {
+        Dictionary<uint, string> titles = new Dictionary<uint, string>();
+        EnumWindows(delegate(IntPtr window, IntPtr data)
+        {
+            if (!IsWindowVisible(window)) return true;
+            uint id;
+            GetWindowThreadProcessId(window, out id);
+            StringBuilder text = new StringBuilder(256);
+            GetWindowText(window, text, text.Capacity);
+            if (text.Length > 0 && !titles.ContainsKey(id)) titles[id] = text.ToString();
+            return true;
+        }, IntPtr.Zero);
+        List<string> found = new List<string>();
+        foreach (KeyValuePair<uint, string> window in titles)
+        {
+            string game = GameOf(PathOf(window.Key), window.Value);
+            if (game != null && !found.Contains(game)) found.Add(game);
+        }
+        return found;
+    }
+
+    private static string PathOf(uint id)
+    {
+        IntPtr process = OpenProcess(QueryLimited, false, id);
+        if (process == IntPtr.Zero) return null;
+        try
+        {
+            StringBuilder name = new StringBuilder(1024);
+            uint size = (uint)name.Capacity;
+            return QueryFullProcessImageName(process, 0, name, ref size) ? name.ToString() : null;
+        }
+        finally { CloseHandle(process); }
+    }
+
+    // Public so it can be checked without games installed.
+    public static string GameOf(string path, string title)
+    {
+        if (string.IsNullOrEmpty(path)) return null;
+        string exe = Path.GetFileNameWithoutExtension(path).ToLowerInvariant();
+        if (Array.IndexOf(HelperExes, exe) >= 0) return null;
+        if (exe == "javaw" || exe == "java") return (title ?? "").StartsWith("Minecraft", StringComparison.OrdinalIgnoreCase) ? "Minecraft" : null;
+        for (int i = 0; i < Known.GetLength(0); i++) if (exe == Known[i, 0]) return Known[i, 1];
+        string low = path.ToLowerInvariant();
+        foreach (string library in Libraries)
+        {
+            int at = low.IndexOf(library, StringComparison.Ordinal);
+            if (at < 0) continue;
+            string rest = path.Substring(at + library.Length);
+            int slash = rest.IndexOf('\\');
+            if (slash <= 0) return null;
+            string folder = rest.Substring(0, slash);
+            if (Array.IndexOf(NotGames, folder.ToLowerInvariant()) >= 0) return null;
+            return folder;
+        }
+        return null;
+    }
+
+    // ---- Saving ----
+
+    private void Load()
+    {
+        try
+        {
+            if (File.Exists(playFile))
+            {
+                DateTime oldest = Clock().Date.AddDays(-KeepDays);
+                foreach (string line in File.ReadAllLines(playFile))
+                {
+                    string[] parts = line.Split('\t');
+                    DateTime day;
+                    double value;
+                    if (parts.Length == 3 && DateTime.TryParseExact(parts[0], "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out day) && day >= oldest
+                        && double.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out value))
+                        seconds[parts[0] + "\t" + parts[1]] = value;
+                }
+            }
+            if (File.Exists(settingsFile))
+                foreach (string line in File.ReadAllLines(settingsFile))
+                {
+                    string[] parts = line.Split('=');
+                    double value;
+                    if (parts.Length != 2) continue;
+                    if (parts[0] == "every" && double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out value) && value >= 15 && value <= 720) every = value;
+                    if (parts[0] == "quiet") quiet = parts[1] == "yes";
+                }
+            if (File.Exists(ignoreFile)) foreach (string line in File.ReadAllLines(ignoreFile)) if (line.Trim().Length > 0) ignored.Add(line.Trim());
+        }
+        catch (IOException error) { capri.Log(error.Message); }
+        catch (UnauthorizedAccessException error) { capri.Log(error.Message); }
+    }
+
+    private void SavePlay()
+    {
+        lastSaved = Clock();
+        DateTime oldest = lastSaved.Date.AddDays(-KeepDays);
+        List<string> lines = new List<string>();
+        foreach (KeyValuePair<string, double> entry in seconds)
+            if (string.CompareOrdinal(entry.Key.Substring(0, 10), oldest.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)) >= 0)
+                lines.Add(entry.Key + "\t" + Math.Round(entry.Value).ToString(CultureInfo.InvariantCulture));
+        Write(playFile, lines);
+    }
+
+    private void SaveSettings() { Write(settingsFile, new List<string> { "every=" + every.ToString(CultureInfo.InvariantCulture), "quiet=" + (quiet ? "yes" : "no") }); }
+    private void SaveIgnored() { Write(ignoreFile, new List<string>(ignored)); }
+
+    private void Write(string file, List<string> lines)
+    {
+        try { File.WriteAllLines(file, lines); }
+        catch (IOException error) { capri.Log(error.Message); }
+        catch (UnauthorizedAccessException error) { capri.Log(error.Message); }
+    }
+
+    // ---- Words ----
+
+    private static double Minutes(string low)
+    {
+        string text = Regex.Replace(low, @"\bhalf\s+(?:an\s+|a\s+)?hour\b", "30 minutes");
+        text = Regex.Replace(text, @"\b(?:a|an|one)\s+(hour|hr|minute|min)\b", "1 $1");
+        double total = -1;
+        foreach (Match part in Regex.Matches(text, @"(\d+(?:\.\d+)?)\s*(h|hrs?|hours?|m|mins?|minutes?)\b(\s+and\s+a\s+half)?", Plain))
+        {
+            double value = double.Parse(part.Groups[1].Value, CultureInfo.InvariantCulture);
+            if (part.Groups[3].Success) value += 0.5;
+            total = Math.Max(total, 0) + (part.Groups[2].Value.StartsWith("h") ? value * 60 : value);
+        }
+        return total;
+    }
+
+    private static readonly Regex NumberWords = new Regex(
+        @"\b(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[\s-]+(?:one|two|three|four|five|six|seven|eight|nine)\b)?" +
+        @"|\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen)\b", Plain);
+    private static readonly string[] Small = { "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen" };
+    private static readonly string[] Tens = { "", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety" };
+
+    private static string Numbers(string text)
+    {
+        return NumberWords.Replace(text, delegate(Match word)
+        {
+            int total = 0;
+            foreach (string piece in Regex.Split(word.Value.ToLowerInvariant(), @"[\s-]+"))
+            {
+                int small = Array.IndexOf(Small, piece), tens = Array.IndexOf(Tens, piece);
+                if (small >= 0) total += small;
+                else if (tens >= 2) total += tens * 10;
+            }
+            return total.ToString();
+        });
+    }
+
+    private static string Spoken(double minutes)
+    {
+        int whole = (int)Math.Round(minutes);
+        if (whole < 1) return "less than a minute";
+        int hours = whole / 60, rest = whole % 60;
+        string h = hours == 0 ? "" : hours == 1 ? "1 hour" : hours + " hours";
+        string m = rest == 0 ? "" : rest == 1 ? "1 minute" : rest + " minutes";
+        return h.Length > 0 && m.Length > 0 ? h + " " + m : h + m;
+    }
+
+    private static string Joined(List<string> items)
+    {
+        if (items.Count < 2) return string.Join("", items);
+        return string.Join(", ", items.GetRange(0, items.Count - 1)) + " and " + items[items.Count - 1];
+    }
+}

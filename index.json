@@ -10,6 +10,14 @@
       "about": "Lachy's tower picks and round-by-round plan for Bloons TD 6, from the first round to round 80. Capri follows it whenever she plays BTD6."
     },
     {
+      "folder": "cat-ears",
+      "file": "cat-ears.capri-skin",
+      "name": "Cat Ears",
+      "kind": "skin",
+      "author": "Issei",
+      "about": "Pointed black cat ears on her head."
+    },
+    {
       "folder": "colors-bubblegum",
       "file": "colors-bubblegum.capri-mod",
       "name": "Colors: Bubblegum",
@@ -50,6 +58,46 @@
       "about": "Capri answers to more names: Nova, Big Z and Capricorn. She still answers to Capri too."
     },
     {
+      "folder": "dice-decider",
+      "file": "dice-decider.capri-code",
+      "name": "Dice & Decider",
+      "kind": "code",
+      "author": "Issei",
+      "about": "Fair dice, coin flips, random numbers and picks."
+    },
+    {
+      "folder": "galaxy-hair-aurora",
+      "file": "galaxy-hair-aurora.capri-skin",
+      "name": "Galaxy Hair: Aurora",
+      "kind": "skin",
+      "author": "Issei",
+      "about": "Her hair as a galaxy: deep space with teal and green clouds."
+    },
+    {
+      "folder": "galaxy-hair-ember",
+      "file": "galaxy-hair-ember.capri-skin",
+      "name": "Galaxy Hair: Ember",
+      "kind": "skin",
+      "author": "Issei",
+      "about": "Her hair as a galaxy: her red melting into plum and deep space."
+    },
+    {
+      "folder": "galaxy-hair-nebula",
+      "file": "galaxy-hair-nebula.capri-skin",
+      "name": "Galaxy Hair: Nebula",
+      "kind": "skin",
+      "author": "Issei",
+      "about": "Her hair as a galaxy: deep space with violet and pink clouds."
+    },
+    {
+      "folder": "halo",
+      "file": "halo.capri-skin",
+      "name": "Halo",
+      "kind": "skin",
+      "author": "Issei",
+      "about": "A jagged white halo floating just above her head."
+    },
+    {
       "folder": "hearing-log",
       "file": "hearing-log.capri-mod",
       "name": "Hearing Log",
@@ -74,6 +122,22 @@
       "about": "A skin for Capri: a maid suit, for you weirdos."
     },
     {
+      "folder": "santa-hat-black",
+      "file": "santa-hat-black.capri-skin",
+      "name": "Santa Hat: Black",
+      "kind": "skin",
+      "author": "Issei",
+      "about": "A sharp black Santa hat for her, in every pose."
+    },
+    {
+      "folder": "santa-hat-crimson",
+      "file": "santa-hat-crimson.capri-skin",
+      "name": "Santa Hat: Crimson",
+      "kind": "skin",
+      "author": "Issei",
+      "about": "A sharp crimson Santa hat for her, in every pose."
+    },
+    {
       "folder": "sharper-ears",
       "file": "sharper-ears.capri-mod",
       "name": "Sharper Ears",
@@ -82,12 +146,36 @@
       "about": "She answers to words that sound like her name, not only exact spellings, like Caprice, Capris or Cah Pree."
     },
     {
+      "folder": "sleep-timer",
+      "file": "sleep-timer.capri-code",
+      "name": "Sleep Timer",
+      "kind": "code",
+      "author": "Issei",
+      "about": "Puts your PC to sleep or shuts it down later, with a warning first."
+    },
+    {
       "folder": "startup-intros",
       "file": "startup-intros.capri-code",
       "name": "Startup Intros",
       "kind": "code",
       "author": "Vocyn",
       "about": "Three start-up animations: Hijack, Shatter and Wake. She shuffles them each time she starts, or you pick one."
+    },
+    {
+      "folder": "touch-grass",
+      "file": "touch-grass.capri-code",
+      "name": "Touch Grass",
+      "kind": "code",
+      "author": "Issei",
+      "about": "Counts your gaming time and roasts you when it's time for a break."
+    },
+    {
+      "folder": "voice-trivia",
+      "file": "voice-trivia.capri-code",
+      "name": "Voice Trivia",
+      "kind": "code",
+      "author": "Issei",
+      "about": "Multiple-choice trivia out loud, with scores."
     }
   ]
 }

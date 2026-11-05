@@ -1,0 +1,524 @@
+// capri-mod: 1
+// id: dice-decider
+// name: Dice & Decider
+// version: 1.0.0
+// author: Issei
+// description: Fair dice, coin flips, random numbers and picks. Say "dice help".
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Security.Cryptography;
+using System.Text.RegularExpressions;
+using CapriDesktop;
+
+// Every roll, flip and pick uses the PC's crypto random numbers, so they're really fair, not the brain guessing.
+// Lines this mod doesn't recognise go on to her as usual.
+public class DiceDecider : ICapriMod
+{
+    private const int MostDice = 100, MostSides = 1000, MostListed = 12, MostTimes = 10, MostCoins = 20, MostOptions = 30;
+    private const long Biggest = 1000000000;
+    private const RegexOptions Plain = RegexOptions.IgnoreCase | RegexOptions.CultureInvariant;
+
+    private static readonly Regex Wake = new Regex(@"^\s*(?:(?:hey|hi|ok|okay|yo|oi)[\s,]+)?capri\b[\s,.:;!?-]*|[\s,]+capri[\s.!?]*$", Plain);
+    private static readonly Regex HelpAsk = new Regex(@"\b(?:dice|decider)\s+(?:help|commands)\b|\bhelp\s+(?:me\s+)?with\s+(?:the\s+)?dice\b", Plain);
+    private static readonly Regex StatsAsk = new Regex(@"\b(?:dice|roll|rolling)\s+stats\b|\bhow\s+lucky\s+am\s+i\b", Plain);
+    private static readonly Regex RerollAsk = new Regex(@"\bre-?roll\b|\broll\s+(?:that\s+|it\s+)?again\b|\bsame\s+roll\b", Plain);
+    private static readonly Regex EightBallAsk = new Regex(@"\b(?:magic\s+)?(?:8|eight)[\s-]?ball\b", Plain);
+    private static readonly Regex CoinAsk = new Regex(@"\b(?:flip|toss)\b[^.?!]*?\bcoins?\b|\bheads\s+or\s+tails\b|\bcoin\s+(?:flip|toss)\b", Plain);
+    private static readonly Regex NumberAsk = new Regex(@"\b(?:random\s+number|(?:pick|choose|give\s+me|roll)\s+a\s+(?:random\s+)?number|number\s+between)\b", Plain);
+    private static readonly Regex OrderAsk = new Regex(@"\b(?:random\s+order|turn\s+order|shuffle\s+(?:these|this\s+list|them|the\s+order)|who\s+goes\s+first)\b", Plain);
+    private static readonly Regex PickAsk = new Regex(@"\b(?:pick|choose|decide)\b((?:\s+(?:for\s+(?:me|us)|a\s+random\s+one|randomly|one|between|from|out\s+of|among))*)\s*([:,-]?)\s*(.*)$", Plain);
+    private static readonly Regex RollAsk = new Regex(@"\b(?:roll|throw)\b", Plain);
+    private static readonly Regex Initiative = new Regex(@"\broll(?:\s+for)?\s+initiative\b", Plain);
+
+    private static readonly Regex NumberWords = new Regex(
+        @"\b(?:(?:a|one)\s+)?hundred\b" +
+        @"|\b(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[\s-]+(?:one|two|three|four|five|six|seven|eight|nine)\b)?" +
+        @"|\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen)\b", Plain);
+    private static readonly string[] Small = { "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen" };
+    private static readonly string[] Tens = { "", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety" };
+    private static readonly string[] Counted = { "zero", "once", "twice", "three times", "four times", "five times", "six times", "seven times", "eight times", "nine times", "ten times" };
+
+    private static readonly Regex Token = new Regex(@"[+-]|\d*d\d+(?:(?:kh|kl|dl|dh|k)\d+)?(?![a-z])|\d+(?![a-z])|[^\s+\-]+", Plain);
+    private static readonly Regex DieToken = new Regex(@"^(\d*)d(\d+)(?:(kh|kl|dl|dh|k)(\d+))?$", Plain);
+
+    private static readonly string[] PickLines = { "{0}. Final answer.", "Easy. {0}.", "{0}. Don't make me pick twice.", "I choose {0}. You're welcome.", "{0}. The dice have spoken. Well, I have." };
+    private static readonly string[] Yes = { "Yes. Obviously.", "Signs point to yes. I'm the signs.", "Do it. I'll take the blame. Probably.", "Yeah, my circuits say yes.", "Absolutely. Don't ask twice." };
+    private static readonly string[] Maybe = { "Ask me later, I'm busy being mysterious.", "Static. Try again.", "Can't tell. The future's buffering.", "Hmm. Flip a coin, coward.", "I could tell you, but where's the fun in that?" };
+    private static readonly string[] No = { "No. Hard no.", "Nope. Not even close.", "My sources say no. I'm the sources.", "Absolutely not. I've seen how this ends.", "Don't. Just don't." };
+
+    private sealed class Term
+    {
+        public int Sign = 1, Count, Sides, KeepN;
+        public long Flat;
+        public char Keep;
+        public bool Signed;
+        public bool Die { get { return Sides > 0; } }
+    }
+
+    private ICapriHost capri;
+    private RandomNumberGenerator random;
+    private string statsFile;
+    private List<Term> lastTerms;
+    private string lastLabel;
+    private int rolls, twenties, ones;
+
+    public void Start(ICapriHost host)
+    {
+        capri = host;
+        random = RandomNumberGenerator.Create();
+        statsFile = Path.Combine(host.Folder, "stats.txt");
+        LoadStats();
+    }
+
+    public void Stop()
+    {
+        if (random != null) random.Dispose();
+        random = null;
+    }
+
+    public bool Heard(string words)
+    {
+        string said = Wake.Replace((words ?? "").Trim(), "").Trim();
+        if (said.Length == 0) return false;
+        string reply = Answer(said);
+        if (reply == null) return false;
+        capri.Say(reply);
+        return true;
+    }
+
+    // Public so it can be tried without her: the line she'd say, or null when it's not for this mod.
+    public string Answer(string said)
+    {
+        if (HelpAsk.IsMatch(said)) return "Try: roll 2d6 plus 3, roll with advantage, flip a coin, random number from 1 to 50, pick between pizza or tacos, random order: Sam, Alex, Jo, or ask the eight ball.";
+        if (StatsAsk.IsMatch(said)) return Stats();
+        if (RerollAsk.IsMatch(said)) return lastTerms == null ? "Nothing to reroll yet. Roll something first." : Roll(lastTerms, lastLabel, 1);
+        if (EightBallAsk.IsMatch(said)) return EightBall();
+        if (CoinAsk.IsMatch(said)) return Coins(Numbers(said.ToLowerInvariant()));
+        if (NumberAsk.IsMatch(said)) return Number(Numbers(said.ToLowerInvariant()));
+        Match order = OrderAsk.Match(said);
+        if (order.Success) return Order(said.Substring(order.Index + order.Length), order.Value.ToLowerInvariant().StartsWith("who"));
+        Match pick = PickAsk.Match(said);
+        if (pick.Success)
+        {
+            string answer = Pick(pick);
+            if (answer != null) return answer;
+        }
+        return Dice(said);
+    }
+
+    // ---- Dice ----
+
+    private string Dice(string said)
+    {
+        string text = Numbers(said.ToLowerInvariant());
+        if (!RollAsk.IsMatch(text) && !LooksLikeOnlyDice(said)) return null;
+        if (Initiative.IsMatch(text)) text = Initiative.Replace(text, "roll 1d20");
+        text = Regex.Replace(text, @"\b(?:percentile|percent)\s+(?:die|dice|roll)\b|\bd%", "1d100");
+        text = Regex.Replace(text, @"(\d+)[\s-]*sided\s+(?:die|dice|dies|dye)\b", "d$1");
+        text = Regex.Replace(text, @"\b(?:dee|d)\s*-?\s*(\d+)", "d$1");
+        text = Regex.Replace(text, @"(\d+)\s*x?\s*d(\d+)", "$1d$2");
+        text = Regex.Replace(text, @"\b(?:a|an|one)\s+d(\d+)", "1d$1");
+        if (!Regex.IsMatch(text, @"\d*d\d+"))
+        {
+            // A die is one d6. Dice with no count are two, like most board games.
+            text = Regex.Replace(text, @"(\d+)\s+(?:dice|die|dies)\b", "$1d6");
+            text = Regex.Replace(text, @"\b(?:a|one)\s+(?:die|dice)\b|\b(?:the|my)\s+die\b", "1d6");
+            text = Regex.Replace(text, @"\b(?:the|my|some)\s+dice\b", "2d6");
+            text = Regex.Replace(text, @"\bdice\b", "2d6");
+        }
+        text = Regex.Replace(text, @"\bplus\b", "+");
+        text = Regex.Replace(text, @"\bminus\b", "-");
+
+        int times = 1;
+        Match repeat = Regex.Match(text, @"\b(\d+)\s+times\b|\btwice\b");
+        if (repeat.Success)
+        {
+            times = repeat.Groups[1].Success ? Clamp(repeat.Groups[1].Value, 1, MostTimes + 1) : 2;
+            text = text.Remove(repeat.Index, repeat.Length);
+        }
+
+        char advantage = '\0';
+        if (Regex.IsMatch(text, @"\bdisadvantage\b")) advantage = 'l';
+        else if (Regex.IsMatch(text, @"\badvantage\b")) advantage = 'h';
+        text = Regex.Replace(text, @"\b(?:with\s+)?(?:dis)?advantage\b", " ");
+
+        char keep = '\0';
+        int keepN = 0;
+        Match drop = Regex.Match(text, @"\bdrop(?:ping)?\s+(?:the\s+)?(lowest|highest)(?:\s+(\d+))?");
+        Match hold = Regex.Match(text, @"\bkeep(?:ing)?\s+(?:the\s+)?(highest|lowest|best|worst)\s+(\d+)");
+        if (drop.Success) { keep = drop.Groups[1].Value == "lowest" ? 'h' : 'l'; keepN = -(drop.Groups[2].Success ? Clamp(drop.Groups[2].Value, 1, MostDice) : 1); text = text.Remove(drop.Index, drop.Length); }
+        else if (hold.Success) { keep = hold.Groups[1].Value == "highest" || hold.Groups[1].Value == "best" ? 'h' : 'l'; keepN = Clamp(hold.Groups[2].Value, 1, MostDice); text = text.Remove(hold.Index, hold.Length); }
+
+        List<Term> terms;
+        string problem;
+        bool hasDie = Parse(text, out terms, out problem);
+        if (problem != null) return problem;
+        if (!hasDie)
+        {
+            // "roll with advantage plus 5" means a d20.
+            if (advantage == '\0') return null;
+            terms.Insert(0, new Term { Count = 1, Sides = 20 });
+        }
+
+        Term first = terms.Find(t => t.Die);
+        if (advantage != '\0' && first.Count == 1 && first.Keep == '\0') { first.Count = 2; first.Keep = advantage; first.KeepN = 1; }
+        if (keep != '\0' && first.Keep == '\0')
+        {
+            int n = keepN < 0 ? first.Count + keepN : keepN;
+            if (n < 1 || n > first.Count) return "You can't keep " + Math.Max(n, 0) + " of " + first.Count + " dice. Nice try.";
+            first.Keep = keep;
+            first.KeepN = n;
+        }
+        lastTerms = terms;
+        lastLabel = Label(terms, advantage);
+        if (times > MostTimes) return "Up to " + MostTimes + " times at once. My arm's getting tired.";
+        return Roll(terms, lastLabel, times);
+    }
+
+    // "d20" or "2d6+3" said on its own, with no roll in front.
+    private static bool LooksLikeOnlyDice(string said)
+    {
+        return Regex.IsMatch(said.Trim().TrimEnd('.', '!', '?'), @"^\d*\s*d\s*\d+(?:\s*[+-]\s*(?:\d*d\d+|\d+))*$", Plain);
+    }
+
+    // Finds the first run like 2d6+1d4-1 in the words. Words break a run, so "2d6 for my 3 goblins" is just 2d6.
+    private static bool Parse(string text, out List<Term> terms, out string problem)
+    {
+        problem = null;
+        List<List<Term>> runs = new List<List<Term>>();
+        List<Term> run = new List<Term>();
+        int sign = 0;
+        foreach (Match token in Token.Matches(text))
+        {
+            string part = token.Value.ToLowerInvariant();
+            if (part == "+" || part == "-")
+            {
+                // Two signs in a row end the run.
+                if (sign != 0 && run.Count > 0) { runs.Add(run); run = new List<Term>(); }
+                sign = part == "-" ? -1 : 1;
+                continue;
+            }
+            Match die = DieToken.Match(part);
+            long flat;
+            Term term = null;
+            if (die.Success)
+            {
+                term = new Term { Count = die.Groups[1].Value.Length == 0 ? 1 : Clamp(die.Groups[1].Value, 0, int.MaxValue), Sides = Clamp(die.Groups[2].Value, 0, int.MaxValue) };
+                if (term.Count < 1 || term.Count > MostDice) { problem = "I can roll 1 to " + MostDice + " dice at once. Not " + die.Groups[1].Value + "."; break; }
+                if (term.Sides < 2 || term.Sides > MostSides) { problem = "Dice need 2 to " + MostSides + " sides. A d" + die.Groups[2].Value + " isn't real. I checked."; break; }
+                if (die.Groups[3].Success)
+                {
+                    string how = die.Groups[3].Value;
+                    int n = Clamp(die.Groups[4].Value, 0, MostDice + 1);
+                    if (how == "dl" || how == "dh") n = term.Count - n;
+                    if (n < 1 || n > term.Count) { problem = "You can't keep " + Math.Max(n, 0) + " of " + term.Count + " dice. Nice try."; break; }
+                    term.Keep = how == "kl" || how == "dh" ? 'l' : 'h';
+                    term.KeepN = n;
+                }
+            }
+            else if (long.TryParse(part, out flat) && flat <= Biggest) term = new Term { Flat = flat };
+            // A word, or two terms with no sign between them, ends the run.
+            if (term == null || run.Count > 0 && sign == 0)
+            {
+                if (run.Count > 0) runs.Add(run);
+                run = new List<Term>();
+                if (term == null) { sign = 0; continue; }
+            }
+            term.Sign = sign < 0 ? -1 : 1;
+            term.Signed = sign != 0;
+            run.Add(term);
+            sign = 0;
+        }
+        if (run.Count > 0) runs.Add(run);
+        terms = new List<Term>();
+        if (problem != null) return false;
+        foreach (List<Term> found in runs)
+            if (found.Exists(t => t.Die)) { terms = found; return true; }
+        // No dice, so keep a +5 or -2 for an advantage roll.
+        foreach (List<Term> found in runs)
+            if (found[0].Signed) { terms = found; break; }
+        return false;
+    }
+
+    private string Roll(List<Term> terms, string label, int times)
+    {
+        int dice = 0;
+        foreach (Term term in terms) dice += term.Count;
+        bool single = terms.Count == 1 && terms[0].Die && terms[0].Count == 1;
+        bool listed = dice <= MostListed && times == 1;
+        List<string> totals = new List<string>();
+        string said = null;
+        rolls++;
+        for (int round = 0; round < times; round++)
+        {
+            long total = 0;
+            List<string> parts = new List<string>();
+            int natural = 0;
+            foreach (Term term in terms)
+            {
+                if (!term.Die)
+                {
+                    total += term.Sign * term.Flat;
+                    parts.Add((term.Sign < 0 ? "minus " : "plus ") + term.Flat);
+                    continue;
+                }
+                int[] got = new int[term.Count];
+                for (int i = 0; i < got.Length; i++) got[i] = (int)Next(1, term.Sides);
+                bool[] kept = Kept(got, term);
+                List<string> keptSaid = new List<string>(), dropped = new List<string>();
+                long sum = 0;
+                for (int i = 0; i < got.Length; i++)
+                {
+                    if (!kept[i]) { dropped.Add(got[i].ToString()); continue; }
+                    sum += got[i];
+                    keptSaid.Add(got[i].ToString());
+                    // Stats count the d20s that counted, so a 20 thrown away by disadvantage isn't a natural twenty.
+                    if (term.Sides == 20 && got[i] == 20) twenties++;
+                    if (term.Sides == 20 && got[i] == 1) ones++;
+                }
+                total += term.Sign * sum;
+                if (term.Sides == 20 && keptSaid.Count == 1) natural = int.Parse(keptSaid[0]);
+                string shown = Joined(keptSaid) + (dropped.Count > 0 ? ", dropped " + Joined(dropped) : "");
+                parts.Add(parts.Count == 0 ? shown : (term.Sign < 0 ? "minus " : "plus ") + shown);
+            }
+            totals.Add(total.ToString());
+            if (round > 0) continue;
+            if (single && terms[0].Keep == '\0' && times == 1) said = "You rolled " + Article(total) + " " + total + ".";
+            else if (listed) said = "Rolling " + label + ": " + string.Join(", ", parts) + ". Total " + total + ".";
+            else said = "Rolling " + label + ": total " + total + ".";
+            if (natural == 20 && terms.FindAll(t => t.Die).Count == 1) said = "Natural twenty! " + said + " Okay, that was cool.";
+            else if (natural == 1 && terms.FindAll(t => t.Die).Count == 1) said = "Natural one. " + said + " I'm saving that for later.";
+        }
+        SaveStats();
+        if (times > 1) return "Rolling " + label + " " + Counted[times] + ": " + Joined(totals) + ".";
+        return said;
+    }
+
+    private static bool[] Kept(int[] got, Term term)
+    {
+        bool[] kept = new bool[got.Length];
+        if (term.Keep == '\0') { for (int i = 0; i < kept.Length; i++) kept[i] = true; return kept; }
+        int[] order = new int[got.Length];
+        for (int i = 0; i < order.Length; i++) order[i] = i;
+        Array.Sort(order, (a, b) => term.Keep == 'h' ? got[b].CompareTo(got[a]) : got[a].CompareTo(got[b]));
+        for (int i = 0; i < term.KeepN; i++) kept[order[i]] = true;
+        return kept;
+    }
+
+    private static string Label(List<Term> terms, char advantage)
+    {
+        List<string> parts = new List<string>();
+        foreach (Term term in terms)
+        {
+            string part;
+            if (!term.Die) part = term.Flat.ToString();
+            else if (advantage != '\0' && term.Sides == 20 && term.Count == 2 && term.KeepN == 1 && parts.Count == 0) part = "d20 with " + (advantage == 'l' ? "disadvantage" : "advantage");
+            else part = term.Count + "d" + term.Sides + (term.Keep == '\0' ? "" : " keep " + (term.Keep == 'h' ? "highest " : "lowest ") + term.KeepN);
+            parts.Add(parts.Count == 0 ? (term.Sign < 0 ? "minus " : "") + part : (term.Sign < 0 ? "minus " : "plus ") + part);
+        }
+        return string.Join(" ", parts);
+    }
+
+    // ---- Coins, numbers, picks ----
+
+    private string Coins(string text)
+    {
+        Match count = Regex.Match(text, @"(\d+)\s+coins\b|\bcoins?\s+(\d+)\s+times\b|\b(\d+)\s+times\b|\b(twice)\b");
+        int n = 1;
+        if (count.Success) n = count.Groups[4].Success ? 2 : Clamp(count.Groups[1].Success ? count.Groups[1].Value : count.Groups[2].Success ? count.Groups[2].Value : count.Groups[3].Value, 1, MostCoins + 1);
+        if (n > MostCoins) return "Up to " + MostCoins + " coins. I don't have infinite pockets.";
+        if (n == 1)
+        {
+            // About once in two thousand flips the coin lands on its edge, and she flips again so you still get an answer.
+            if (Next(1, 2000) == 1) return "It landed on its edge. I didn't know that was allowed. Flipping again... " + (Next(0, 1) == 0 ? "heads." : "tails.");
+            return Next(0, 1) == 0 ? "Heads." : "Tails.";
+        }
+        List<string> sides = new List<string>();
+        int heads = 0;
+        for (int i = 0; i < n; i++)
+        {
+            bool head = Next(0, 1) == 0;
+            if (head) heads++;
+            sides.Add(head ? "heads" : "tails");
+        }
+        return Upper(string.Join(", ", sides)) + ". That's " + heads + " heads and " + (n - heads) + " tails.";
+    }
+
+    private string Number(string text)
+    {
+        // A minus counts only after a space, so "1-10" is 1 to 10, and "-5 to 5" still starts below zero.
+        MatchCollection found = Regex.Matches(text, @"(?:(?<![\w-])-)?\d+");
+        long low = 1, high = 100;
+        if (found.Count >= 2) { low = Parse(found[0].Value); high = Parse(found[1].Value); }
+        else if (found.Count == 1) high = Parse(found[0].Value);
+        if (low > high) { long swap = low; low = high; high = swap; }
+        if (Math.Abs(low) > Biggest || Math.Abs(high) > Biggest) return "Keep it under a billion. I have limits. Few, but some.";
+        return "Your number is " + Next(low, high) + ".";
+    }
+
+    private string Pick(Match pick)
+    {
+        string asked = pick.Groups[1].Value.ToLowerInvariant();
+        bool listed = asked.Trim().Length > 0 || pick.Groups[2].Value.Length > 0;
+        string tail = pick.Groups[3].Value;
+        int colon = tail.LastIndexOf(':');
+        if (colon >= 0) { tail = tail.Substring(colon + 1); listed = true; }
+        // "pick up milk and eggs" isn't a choice, so a list needs a colon or a word like between in front of it.
+        if (!listed) return null;
+        tail = Regex.Replace(tail, @"^\s*(?:(?:of|from|between|among)\s+)?(?:(?:these|them|the\s+following)\b)?\s*[:,-]?\s*(?:whether\s+(?:to\s+)?|if\s+i\s+should\s+|should\s+i\s+)?", "", Plain);
+        bool byAnd;
+        List<string> options = Options(tail, out byAnd);
+        // "pick one of my songs and play it" splits only on and, so that needs between: "choose between pizza and tacos".
+        if (byAnd && colon < 0 && asked.IndexOf("between", StringComparison.Ordinal) < 0) return null;
+        if (options.Count < 2 || options.Count > MostOptions) return null;
+        return string.Format(PickLines[(int)Next(0, PickLines.Length - 1)], options[(int)Next(0, options.Count - 1)]);
+    }
+
+    private string Order(string tail, bool first)
+    {
+        tail = Regex.Replace(tail, @"^\s*(?:for|of|between|among|from|out\s+of|with)?\s*[:,-]?\s*", "", Plain);
+        int colon = tail.LastIndexOf(':');
+        if (colon >= 0) tail = tail.Substring(colon + 1);
+        bool byAnd;
+        List<string> options = Options(tail, out byAnd);
+        if (options.Count < 2) return first ? "Who's playing? Say something like: who goes first, Sam, Alex or Jo." : "Give me a list, like: random order, Sam, Alex, Jo.";
+        if (options.Count > MostOptions) return "That's a lot of people. Up to " + MostOptions + ", please.";
+        if (first) return options[(int)Next(0, options.Count - 1)] + " goes first.";
+        for (int i = options.Count - 1; i > 0; i--)
+        {
+            int j = (int)Next(0, i);
+            string swap = options[i];
+            options[i] = options[j];
+            options[j] = swap;
+        }
+        return "Here's the order: " + string.Join(", then ", options) + ".";
+    }
+
+    // "pizza, tacos, or sushi" and "pizza or tacos" split on commas and or. Only with neither does and split, so "mac and cheese or pizza" stays whole.
+    private static List<string> Options(string tail, out bool byAnd)
+    {
+        tail = tail.Trim().TrimEnd('.', '!', '?', ' ');
+        byAnd = !Regex.IsMatch(tail, @",|;|/|\bor\b", Plain);
+        string[] parts = byAnd
+            ? Regex.Split(tail, @"\s+\band\b\s+", Plain)
+            : Regex.Split(tail, @"\s*(?:,|;|/|\bor\b)\s*", Plain);
+        // "Ana, Ben and Cy": with commas and no or, the last and splits too.
+        if (!byAnd && parts.Length > 1 && !Regex.IsMatch(tail, @"\bor\b", Plain))
+        {
+            List<string> split = new List<string>(parts);
+            string last = split[split.Count - 1];
+            split.RemoveAt(split.Count - 1);
+            split.AddRange(Regex.Split(last, @"\s+\band\b\s+", Plain));
+            parts = split.ToArray();
+        }
+        List<string> options = new List<string>();
+        foreach (string part in parts)
+        {
+            string option = Regex.Replace(part.Trim().Trim('"', '\'', '.', ' '), @"^(?:and|or|maybe|either)\s+", "", Plain).Trim();
+            if (option.Length > 0 && option.Length <= 80) options.Add(Upper(option));
+        }
+        return options;
+    }
+
+    private string EightBall()
+    {
+        int mood = (int)Next(0, 2);
+        string[] lines = mood == 0 ? Yes : mood == 1 ? Maybe : No;
+        return lines[(int)Next(0, lines.Length - 1)];
+    }
+
+    // ---- Stats ----
+
+    private string Stats()
+    {
+        if (rolls == 0) return "No rolls yet. Your luck is a mystery, even to me.";
+        string mood = twenties > ones ? "The dice like you. Suspicious." : twenties < ones ? "The dice hate you. I respect them." : "Perfectly balanced. Boring.";
+        return rolls + (rolls == 1 ? " roll" : " rolls") + " so far. Natural twenties: " + twenties + ". Natural ones: " + ones + ". " + mood;
+    }
+
+    private void LoadStats()
+    {
+        try
+        {
+            if (!File.Exists(statsFile)) return;
+            string[] parts = File.ReadAllText(statsFile).Trim().Split(' ');
+            if (parts.Length != 3) return;
+            int.TryParse(parts[0], out rolls);
+            int.TryParse(parts[1], out twenties);
+            int.TryParse(parts[2], out ones);
+        }
+        catch (IOException error) { capri.Log(error.Message); }
+        catch (UnauthorizedAccessException error) { capri.Log(error.Message); }
+    }
+
+    private void SaveStats()
+    {
+        if (statsFile == null) return;
+        try { File.WriteAllText(statsFile, rolls + " " + twenties + " " + ones); }
+        catch (IOException error) { capri.Log(error.Message); }
+        catch (UnauthorizedAccessException error) { capri.Log(error.Message); }
+    }
+
+    // ---- Helpers ----
+
+    // A fair whole number from low to high, both included: random bytes, and any draw past the last full range is thrown away.
+    private long Next(long low, long high)
+    {
+        ulong range = (ulong)(high - low) + 1, limit = 4294967296UL - 4294967296UL % range, value;
+        byte[] bytes = new byte[4];
+        do
+        {
+            random.GetBytes(bytes);
+            value = BitConverter.ToUInt32(bytes, 0);
+        } while (value >= limit);
+        return low + (long)(value % range);
+    }
+
+    // "roll two d twenty plus five" becomes "roll 2 d20 + 5".
+    private static string Numbers(string text)
+    {
+        return NumberWords.Replace(text, delegate(Match word) { return Value(word.Value.ToLowerInvariant()).ToString(); });
+    }
+
+    private static int Value(string words)
+    {
+        if (words.EndsWith("hundred")) return 100;
+        int total = 0;
+        foreach (string word in Regex.Split(words, @"[\s-]+"))
+        {
+            int small = Array.IndexOf(Small, word), tens = Array.IndexOf(Tens, word);
+            if (small >= 0) total += small;
+            else if (tens >= 2) total += tens * 10;
+        }
+        return total;
+    }
+
+    private static int Clamp(string digits, int low, int high)
+    {
+        long value;
+        if (!long.TryParse(digits, out value)) return high;
+        return (int)Math.Max(low, Math.Min(high, value));
+    }
+
+    private static long Parse(string digits)
+    {
+        long value;
+        return long.TryParse(digits, out value) ? value : Biggest + 1;
+    }
+
+    private static string Joined(List<string> items)
+    {
+        if (items.Count < 2) return string.Join("", items);
+        return string.Join(", ", items.GetRange(0, items.Count - 1)) + " and " + items[items.Count - 1];
+    }
+
+    private static string Article(long number)
+    {
+        string digits = Math.Abs(number).ToString();
+        return digits.StartsWith("8") || digits == "11" || digits == "18" ? "an" : "a";
+    }
+
+    private static string Upper(string text) { return text.Length == 0 ? text : char.ToUpperInvariant(text[0]) + text.Substring(1); }
+}

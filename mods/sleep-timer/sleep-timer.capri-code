@@ -1,0 +1,330 @@
+// capri-mod: 1
+// id: sleep-timer
+// name: Sleep Timer
+// version: 1.0.0
+// author: Issei
+// description: Puts your PC to sleep or shuts it down later, with a warning first.
+
+using System;
+using System.Diagnostics;
+using System.Globalization;
+using System.IO;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Windows.Forms;
+using CapriDesktop;
+
+// One timer at a time. She warns at 5 minutes and 1 minute, says goodnight, then puts the PC to sleep or shuts it down.
+// A shutdown is a normal one, so an app with unsaved work can still stop it. If Capri restarts, a timer that's still
+// in the future carries on, and one that ran out while she was closed is dropped, never acted on late.
+public class SleepTimer : ICapriMod
+{
+    // The harness fills these in to test without a clock or a real shutdown.
+    public Func<DateTime> Clock;
+    public Action<string> PowerAction;
+
+    private const RegexOptions Plain = RegexOptions.IgnoreCase | RegexOptions.CultureInvariant;
+    private const double Shortest = 1, Longest = 12 * 60, Grace = 8, SnoozeMinutes = 15;
+    private static readonly Regex Wake = new Regex(@"^\s*(?:(?:hey|hi|ok|okay|yo|oi)[\s,]+)?capri\b[\s,.:;!?-]*|[\s,]+capri[\s.!?]*$", Plain);
+    private static readonly Regex Named = new Regex(@"\bsleep\s+timer\b|\bshut\s*down\b|\bpower\s+off\b", Plain);
+    private static readonly Regex Cancel = new Regex(@"\b(?:cancel|stop|turn\s+off|kill|abort|clear|remove|delete)\b|\bdon'?t\s+(?:shut\s*down|turn\s+off|sleep)\b|\bnever\s*mind\b", Plain);
+    private static readonly Regex StillUp = new Regex(@"\bi'?m\s+(?:still\s+)?(?:awake|up)\b|\bnot\s+(?:asleep|sleeping)\b", Plain);
+    private static readonly Regex Status = new Regex(@"\bhow\s+(?:long|much\s+time)\b|\btime\s+left\b|\bwhen\b|\bstatus\b|\bis\s+there\s+a\b", Plain);
+    private static readonly Regex Snooze = new Regex(@"\bsnooze\b|\b(?:add|extend|give\s+me)\b.*\bmore\b|\b(?:add|extend)\b.*\b(?:sleep\s+timer|shut\s*down)\b", Plain);
+    private static readonly Regex Shutdown = new Regex(@"\bshut\s*down\b|\b(?:turn|power|switch)\s+(?:off\s+)?(?:my\s+|the\s+)?(?:pc|computer|laptop|everything)(?:\s+off)?\b|\bpower\s+off\b", Plain);
+    private static readonly Regex Sleep = new Regex(@"\bsleep\s+timer\b|\b(?:put|send)\s+(?:my\s+|the\s+)?(?:pc|computer|laptop)\s+to\s+sleep\b|\b(?:pc|computer|laptop)\s+(?:to\s+)?sleep\b|\bsleep\s+(?:my\s+|the\s+)?(?:pc|computer|laptop)\b", Plain);
+
+    private static readonly Regex NumberWords = new Regex(
+        @"\b(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[\s-]+(?:one|two|three|four|five|six|seven|eight|nine)\b)?" +
+        @"|\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen)\b", Plain);
+    private static readonly string[] Small = { "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen" };
+    private static readonly string[] Tens = { "", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety" };
+
+    private readonly object gate = new object();
+    private ICapriHost capri;
+    private System.Threading.Timer beat;
+    private string saved;
+    private DateTime deadline, firing;
+    private string action;            // "sleep" or "shutdown", null when no timer is set
+    private bool warnedFive, warnedOne, fired;
+
+    public void Start(ICapriHost host)
+    {
+        capri = host;
+        saved = Path.Combine(host.Folder, "timer.txt");
+        if (PowerAction == null) PowerAction = Act;
+        bool real = Clock == null;
+        if (real) Clock = delegate { return DateTime.Now; };
+        Load();
+        if (real) beat = new System.Threading.Timer(delegate { Tick(); }, null, 1000, 1000);
+    }
+
+    public void Stop()
+    {
+        if (beat != null) beat.Dispose();
+        beat = null;
+    }
+
+    public bool Heard(string words)
+    {
+        string said = Wake.Replace((words ?? "").Trim(), "").Trim();
+        if (said.Length == 0) return false;
+        string reply;
+        lock (gate) reply = Answer(said);
+        if (reply == null) return false;
+        capri.Say(reply);
+        return true;
+    }
+
+    private string Answer(string said)
+    {
+        string low = Numbers(said.ToLowerInvariant());
+        bool named = Named.IsMatch(low);
+        DateTime now = Clock();
+
+        if (action != null && (named && Cancel.IsMatch(low) || StillUp.IsMatch(low))) return CancelTimer();
+        if (action == null && named && Cancel.IsMatch(low)) return "There's no sleep timer running.";
+        if (named && Status.IsMatch(low) && !HasTime(low)) return action == null ? "No sleep timer running." : Left(now);
+        // Snooze only takes over while a timer is running and close to the end, so her own reminders keep their snooze.
+        if (action != null && Snooze.IsMatch(low) && (named || Regex.IsMatch(low, @"\bmore\b") || deadline - now <= TimeSpan.FromMinutes(10)))
+        {
+            double more = Minutes(low);
+            if (more <= 0) more = SnoozeMinutes;
+            if ((deadline - now).TotalMinutes + more > Longest) return "That's past twelve hours. Go to bed.";
+            Set(action, (fired ? now : deadline).AddMinutes(more), now);
+            return "Fine, " + Spoken(more) + " more. " + Left(now);
+        }
+
+        bool down = Shutdown.IsMatch(low), sleep = Sleep.IsMatch(low);
+        if (!down && !sleep) return null;
+        string want = down ? "shutdown" : "sleep";
+        DateTime? at = When(low, now);
+        if (at == null)
+        {
+            // "shut down" alone is hers to handle. Only "sleep timer" with no time gets asked how long.
+            return Regex.IsMatch(low, @"\bsleep\s+timer\b") ? "How long? Say something like: sleep timer 45 minutes, or shut down at 1am." : null;
+        }
+        double minutes = (at.Value - now).TotalMinutes;
+        if (minutes < Shortest - 0.01) return "At least a minute. I need time to say goodnight.";
+        if (minutes > Longest + 0.01) return "Up to twelve hours. For longer, just turn it off yourself.";
+        bool replacing = action != null;
+        Set(want, at.Value, now);
+        return (replacing ? "Changed it. " : "Okay. ") + (want == "shutdown" ? "I'll shut your PC down" : "I'll put your PC to sleep") +
+            " at " + Clocked(deadline) + ", in " + Spoken(minutes) + ". I'll warn you first.";
+    }
+
+    // Called every second for real, or every fake minute by the harness.
+    public void Tick()
+    {
+        string say = null, act = null;
+        lock (gate)
+        {
+            if (action == null) return;
+            DateTime now = Clock();
+            double left = (deadline - now).TotalMinutes;
+            if (fired)
+            {
+                if (now < firing) return;
+                act = action;
+                Clear();
+            }
+            else if (left < -2)
+            {
+                // The PC slept or froze past the time. Acting now would shut it down the moment they wake it.
+                Clear();
+                say = "Your sleep timer ran out while the PC was away, so I dropped it.";
+            }
+            else if (left <= 0)
+            {
+                fired = true;
+                firing = now.AddSeconds(Grace);
+                say = action == "shutdown" ? "Goodnight. Shutting your PC down." : "Goodnight. Putting your PC to sleep.";
+            }
+            else if (left <= 1 && !warnedOne)
+            {
+                warnedOne = warnedFive = true;
+                say = "One minute until I " + (action == "shutdown" ? "shut your PC down" : "put your PC to sleep") + ". Say snooze for 15 more, or cancel the sleep timer.";
+            }
+            else if (left <= 5 && !warnedFive && (deadline - started).TotalMinutes >= 10)
+            {
+                warnedFive = true;
+                say = "Five minutes until " + (action == "shutdown" ? "shutdown" : "your PC sleeps") + ". Say cancel the sleep timer if you're still up.";
+            }
+        }
+        if (say != null) capri.Say(say);
+        if (act != null)
+        {
+            try { PowerAction(act); }
+            catch (Exception error) { capri.Log("Couldn't " + act + ": " + error.Message); capri.Say("I tried to " + (act == "shutdown" ? "shut down" : "sleep") + " your PC, but Windows said no."); }
+        }
+    }
+
+    private DateTime started;
+
+    private void Set(string what, DateTime when, DateTime now)
+    {
+        action = what;
+        deadline = when;
+        started = now;
+        warnedFive = warnedOne = fired = false;
+        Save();
+    }
+
+    private string CancelTimer()
+    {
+        Clear();
+        return "Cancelled. Your PC stays on. Go to sleep anyway.";
+    }
+
+    private void Clear()
+    {
+        action = null;
+        fired = false;
+        try { if (File.Exists(saved)) File.Delete(saved); }
+        catch (IOException error) { capri.Log(error.Message); }
+        catch (UnauthorizedAccessException error) { capri.Log(error.Message); }
+    }
+
+    private string Left(DateTime now)
+    {
+        if (fired) return "Any second now.";
+        double minutes = Math.Max(0, (deadline - now).TotalMinutes);
+        return Upper(Spoken(minutes)) + " left. " + (action == "shutdown" ? "Shutdown" : "Sleep") + " at " + Clocked(deadline) + ".";
+    }
+
+    private static void Act(string what)
+    {
+        if (what == "sleep")
+        {
+            Application.SetSuspendState(PowerState.Suspend, false, false);
+            return;
+        }
+        ProcessStartInfo shutdown = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "shutdown.exe"), "/s /t 0") { UseShellExecute = false, CreateNoWindow = true };
+        using (Process.Start(shutdown)) { }
+    }
+
+    // ---- When ----
+
+    private static bool HasTime(string low) { return Minutes(low) >= 0 || Regex.IsMatch(low, @"\bat\s+(?:\d|midnight|noon)", Plain); }
+
+    // "in 40 minutes", "an hour and a half", "90 mins", "1.5 hours", or "at 1am", "at 12:30", "at midnight".
+    private static DateTime? When(string low, DateTime now)
+    {
+        Match at = Regex.Match(low, @"\bat\s+(?:(midnight)|(noon)|(\d{1,2})(?::(\d{2}))?\s*(a\.?\s?m\.?|p\.?\s?m\.?)?(?![\d:]))", Plain);
+        if (at.Success)
+        {
+            int hour, minute = at.Groups[4].Success ? int.Parse(at.Groups[4].Value) : 0;
+            if (at.Groups[1].Success) hour = 0;
+            else if (at.Groups[2].Success) hour = 12;
+            else hour = int.Parse(at.Groups[3].Value);
+            if (hour > 23 || minute > 59) return null;
+            string half = at.Groups[5].Value.Replace(".", "").Replace(" ", "");
+            DateTime best;
+            if (half.Length > 0)
+            {
+                if (hour < 1 || hour > 12) return null;
+                hour = hour % 12 + (half == "pm" ? 12 : 0);
+                best = Next(now, hour, minute);
+            }
+            else if (hour == 0 || hour > 12 || at.Groups[1].Success || at.Groups[2].Success) best = Next(now, hour, minute);
+            else
+            {
+                // "at 1" with no am or pm is whichever 1 o'clock comes first.
+                DateTime one = Next(now, hour % 12, minute), other = Next(now, hour % 12 + 12, minute);
+                best = one < other ? one : other;
+            }
+            return best;
+        }
+        double minutes = Minutes(low);
+        if (minutes < 0) return null;
+        return now.AddMinutes(minutes);
+    }
+
+    private static DateTime Next(DateTime now, int hour, int minute)
+    {
+        DateTime today = now.Date.AddHours(hour).AddMinutes(minute);
+        return today > now ? today : today.AddDays(1);
+    }
+
+    // Minutes said in the line, or -1 when it says none. Half and quarter go first, so "half an hour" isn't "an hour".
+    private static double Minutes(string low)
+    {
+        string text = Regex.Replace(low, @"\bhalf\s+(?:an\s+|a\s+)?hour\b", "30 minutes");
+        text = Regex.Replace(text, @"\b(?:a\s+)?quarter\s+(?:of\s+)?(?:an\s+)?hour\b", "15 minutes");
+        text = Regex.Replace(text, @"\b(?:a|an|one)\s+(hour|hr|minute|min)\b", "1 $1");
+        double total = -1;
+        foreach (Match part in Regex.Matches(text, @"(\d+(?:\.\d+)?)\s*(h|hrs?|hours?|m|mins?|minutes?)\b(\s+and\s+a\s+half)?", Plain))
+        {
+            double value = double.Parse(part.Groups[1].Value, CultureInfo.InvariantCulture);
+            bool hours = part.Groups[2].Value.StartsWith("h");
+            if (part.Groups[3].Success) value += 0.5;
+            total = Math.Max(total, 0) + (hours ? value * 60 : value);
+        }
+        return total;
+    }
+
+    private static string Numbers(string text)
+    {
+        return NumberWords.Replace(text, delegate(Match word)
+        {
+            int total = 0;
+            foreach (string piece in Regex.Split(word.Value.ToLowerInvariant(), @"[\s-]+"))
+            {
+                int small = Array.IndexOf(Small, piece), tens = Array.IndexOf(Tens, piece);
+                if (small >= 0) total += small;
+                else if (tens >= 2) total += tens * 10;
+            }
+            return total.ToString();
+        });
+    }
+
+    private static string Spoken(double minutes)
+    {
+        int whole = (int)Math.Round(minutes);
+        if (whole < 1) return "less than a minute";
+        int hours = whole / 60, rest = whole % 60;
+        string h = hours == 0 ? "" : hours == 1 ? "1 hour" : hours + " hours";
+        string m = rest == 0 ? "" : rest == 1 ? "1 minute" : rest + " minutes";
+        return h.Length > 0 && m.Length > 0 ? h + " " + m : h + m;
+    }
+
+    private static string Clocked(DateTime when) { return when.ToString("h:mm tt", CultureInfo.InvariantCulture); }
+    private static string Upper(string text) { return text.Length == 0 ? text : char.ToUpperInvariant(text[0]) + text.Substring(1); }
+
+    // ---- Saved timer ----
+
+    private void Save()
+    {
+        try { File.WriteAllText(saved, action + " " + deadline.ToString("o", CultureInfo.InvariantCulture) + " " + started.ToString("o", CultureInfo.InvariantCulture)); }
+        catch (IOException error) { capri.Log(error.Message); }
+        catch (UnauthorizedAccessException error) { capri.Log(error.Message); }
+    }
+
+    private void Load()
+    {
+        try
+        {
+            if (!File.Exists(saved)) return;
+            string[] parts = File.ReadAllText(saved).Trim().Split(' ');
+            DateTime when, from;
+            if (parts.Length == 3 && (parts[0] == "sleep" || parts[0] == "shutdown")
+                && DateTime.TryParse(parts[1], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out when)
+                && DateTime.TryParse(parts[2], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out from)
+                && when > Clock())
+            {
+                action = parts[0];
+                deadline = when;
+                started = from;
+                double left = (when - Clock()).TotalMinutes;
+                warnedOne = left <= 1;
+                warnedFive = left <= 5;
+                capri.Log("Sleep timer carried on: " + action + " at " + Clocked(when));
+                return;
+            }
+            // Ran out while she was closed, or unreadable: drop it rather than shut down by surprise.
+            File.Delete(saved);
+        }
+        catch (IOException error) { capri.Log(error.Message); }
+        catch (UnauthorizedAccessException error) { capri.Log(error.Message); }
+    }
+}

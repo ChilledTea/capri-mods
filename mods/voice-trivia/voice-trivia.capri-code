@@ -1,0 +1,461 @@
+// capri-mod: 1
+// id: voice-trivia
+// name: Voice Trivia
+// version: 1.0.0
+// author: Issei
+// description: Multiple-choice trivia out loud. Say "quiz me".
+
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Net;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading;
+using CapriDesktop;
+
+// Questions come from opentdb.com, a free trivia database that needs no key. Nothing is sent but the category and
+// how many. If it can't be reached, she asks her own questions from the list at the bottom.
+// While a quiz is on, a line that isn't an answer or a quiz word still goes to her as usual.
+public class VoiceTrivia : ICapriMod
+{
+    // The harness fills these in to test without the internet or threads.
+    public Func<string, string> Fetch;
+    public Action<Action> Run;
+
+    private const RegexOptions Plain = RegexOptions.IgnoreCase | RegexOptions.CultureInvariant;
+    private const int DefaultCount = 5, MostCount = 20;
+    private static readonly Regex Wake = new Regex(@"^\s*(?:(?:hey|hi|ok|okay|yo|oi)[\s,]+)?capri\b[\s,.:;!?-]*|[\s,]+capri[\s.!?]*$", Plain);
+    private static readonly Regex StartAsk = new Regex(@"\bquiz\s+me\b|\b(?:start|play|do|begin|new)\s+(?:a\s+|some\s+)?(?:trivia|quiz)\b|\btrivia\s+(?:time|night|game|quiz)\b|\bask\s+me\s+(?:some\s+|a\s+few\s+)?(?:trivia|quiz)(?:\s+questions)?\b|^(?:let'?s\s+(?:do|play)\s+)?trivia$", Plain);
+    private static readonly Regex StopAsk = new Regex(@"\b(?:stop|quit|end|cancel|exit|finish)\b.*\b(?:quiz|trivia|game|questions)\b|^(?:stop|quit|i\s+quit|i'?m\s+done|enough)$", Plain);
+    private static readonly Regex SkipAsk = new Regex(@"^(?:skip|pass|next)(?:\s+(?:it|this|that|question|this\s+one|one))?$|^i\s+(?:don'?t|do\s+not)\s+know$|^no\s+idea$|^(?:i\s+)?give\s+up$", Plain);
+    private static readonly Regex RepeatAsk = new Regex(@"^(?:repeat|again|say\s+(?:that|it)\s+again|repeat\s+(?:that|the\s+question|it)|what\s+was\s+the\s+question|what\s+were\s+the\s+(?:options|answers|choices)|read\s+(?:it|that)\s+again)$", Plain);
+    private static readonly Regex HintAsk = new Regex(@"\b(?:hint|clue|fifty[\s-]?fifty|50[\s/-]?50)\b", Plain);
+    private static readonly Regex ScoreAsk = new Regex(@"^(?:what'?s\s+)?(?:my\s+|the\s+)?score$|^how\s+am\s+i\s+doing$|\bwhat'?s\s+my\s+score\b", Plain);
+    private static readonly Regex BestAsk = new Regex(@"^(?=.*\b(?:trivia|quiz)\b)(?=.*\b(?:best|high|top)\b)(?=.*\b(?:scores?|records?)\b)", Plain);
+    private static readonly Regex Filler = new Regex(@"^(?:(?:um+|uh+|hmm+|okay|ok|so|well|i\s+think|i\s+guess|i'?d\s+say|i'?ll\s+(?:go|say)\s+(?:with\s+)?|i'?m\s+going\s+with|my\s+answer\s+is|the\s+answer\s+is|answer|it'?s|it\s+is|is\s+it|maybe|go\s+with|option|letter|choice|final\s+answer)[\s,:]*)*", Plain);
+    private static readonly string[] Letters = { "A", "B", "C", "D" };
+    private static readonly string[][] Spoken =
+    {
+        new[] { "a", "ay", "eh", "first", "the first one", "first one" },
+        new[] { "b", "bee", "be", "second", "the second one", "second one" },
+        new[] { "c", "see", "sea", "si", "third", "the third one", "third one" },
+        new[] { "d", "dee", "de", "fourth", "last", "the last one", "last one", "the fourth one", "fourth one" }
+    };
+    private static readonly string[,] Categories =
+    {
+        // words they might say, Open Trivia DB category, what she calls it, her own questions' category
+        { @"anime|manga", "31", "anime", "anime" }, { @"video\s*games?|gaming|games", "15", "video game", "games" },
+        { @"movies?|films?|cinema", "11", "movie", "movies" }, { @"music|songs?|bands?", "12", "music", "music" },
+        { @"tv|television|shows|series", "14", "TV", "general" }, { @"science|nature|biology|chemistry|physics", "17", "science", "science" },
+        { @"computers?|tech|technology|programming|coding", "18", "computer", "general" }, { @"history|historical", "23", "history", "history" },
+        { @"geography|countries|capitals|maps?|world", "22", "geography", "geography" }, { @"sports?|football|soccer|basketball", "21", "sports", "general" },
+        { @"animals?|wildlife", "27", "animal", "science" }, { @"books?|literature|novels?", "10", "book", "general" },
+        { @"cartoons?|animation", "32", "cartoon", "general" }, { @"maths?|mathematics", "19", "maths", "general" },
+        { @"mytholog(?:y|ies)|myths?|gods", "20", "mythology", "general" }, { @"general(?:\s+knowledge)?|anything|random|mixed", "", "general knowledge", "general" }
+    };
+
+    private sealed class Question
+    {
+        public string Text, Correct, Topic;
+        public List<string> Options;
+        public bool[] Hidden = new bool[4];
+        public int Answer { get { return Options.IndexOf(Correct); } }
+    }
+
+    private readonly object gate = new object();
+    private ICapriHost capri;
+    private RandomNumberGenerator random;
+    private string bestFile;
+    private List<Question> questions;
+    private int at, score, round;
+    private string topic, topicKey;
+    private bool loading, hinted;
+
+    public void Start(ICapriHost host)
+    {
+        capri = host;
+        random = RandomNumberGenerator.Create();
+        bestFile = Path.Combine(host.Folder, "best.txt");
+        if (Fetch == null) Fetch = Download;
+        if (Run == null) Run = delegate(Action work) { ThreadPool.QueueUserWorkItem(delegate { work(); }); };
+    }
+
+    public void Stop()
+    {
+        lock (gate) { questions = null; loading = false; round++; }
+        if (random != null) random.Dispose();
+        random = null;
+    }
+
+    public bool Heard(string words)
+    {
+        string said = Wake.Replace((words ?? "").Trim(), "").Trim().TrimEnd('.', '!', '?', ' ');
+        if (said.Length == 0) return false;
+        List<string> lines = new List<string>();
+        Action after = null;
+        lock (gate) after = Answer(said, lines);
+        foreach (string line in lines) capri.Say(line);
+        if (after != null) Run(after);
+        return lines.Count > 0 || after != null;
+    }
+
+    // Fills in what she says; returns work to do off the UI thread (loading questions), if any.
+    private Action Answer(string said, List<string> lines)
+    {
+        if (BestAsk.IsMatch(said)) { lines.Add(Bests()); return null; }
+        if (StartAsk.IsMatch(said)) return Begin(said, lines);
+        if (loading)
+        {
+            if (StopAsk.IsMatch(said)) { loading = false; round++; lines.Add("Okay, never mind the quiz."); }
+            return null;
+        }
+        if (questions == null) return null;
+        Question now = questions[at];
+        if (StopAsk.IsMatch(said)) { Finish(lines, true); return null; }
+        if (RepeatAsk.IsMatch(said)) { lines.Add(Asked(now)); return null; }
+        if (ScoreAsk.IsMatch(said)) { lines.Add("You've got " + score + " out of " + at + " so far."); return null; }
+        if (HintAsk.IsMatch(said)) { lines.Add(Hint(now)); return null; }
+        if (SkipAsk.IsMatch(said))
+        {
+            lines.Add("Skipped. It was " + Letters[now.Answer] + ", " + now.Correct + ".");
+            NextQuestion(lines);
+            return null;
+        }
+        int picked = Picked(said, now);
+        if (picked < 0) return null;
+        if (now.Hidden[picked]) { lines.Add("That one's been ruled out, genius. Pick another."); return null; }
+        if (picked == now.Answer)
+        {
+            score++;
+            lines.Add(Pick(new[] { "Correct!", "Yep, " + now.Correct + ".", "Correct. Don't let it go to your head.", "Right! Okay, nerd.", "Got it. " + now.Correct + "." }));
+        }
+        else lines.Add(Pick(new[] { "Nope. ", "Wrong. ", "Not quite. ", "Ouch. No. " }) + "It was " + Letters[now.Answer] + ", " + now.Correct + ".");
+        NextQuestion(lines);
+        return null;
+    }
+
+    private Action Begin(string said, List<string> lines)
+    {
+        string low = Numbers(said.ToLowerInvariant());
+        int count = DefaultCount;
+        Match many = Regex.Match(low, @"\b(\d+)\s+(?:more\s+)?(?:questions?|rounds?)\b");
+        if (many.Success) count = Math.Max(1, Math.Min(MostCount, int.Parse(many.Groups[1].Value)));
+        string category = "", name = "general knowledge", key = "general";
+        for (int i = 0; i < Categories.GetLength(0); i++)
+        {
+            if (!Regex.IsMatch(low, @"\b(?:" + Categories[i, 0] + @")\b", Plain)) continue;
+            category = Categories[i, 1];
+            name = Categories[i, 2];
+            key = Categories[i, 3];
+            break;
+        }
+        string difficulty = Regex.Match(low, @"\b(easy|medium|hard)\b").Groups[1].Value;
+        if (Regex.IsMatch(low, @"\b(?:difficult|tough)\b")) difficulty = "hard";
+        questions = null;
+        loading = true;
+        topic = name;
+        topicKey = key + (difficulty.Length > 0 ? " " + difficulty : "");
+        int mine = ++round;
+        lines.Add("Okay. " + Upper(count == 1 ? "one " + name + " question" : Count(count) + " " + name + " questions") + (difficulty.Length > 0 ? ", " + difficulty : "") + ". Answer with the letter or the answer. Loading.");
+        string url = "https://opentdb.com/api.php?amount=" + count + "&type=multiple&encode=url3986" + (category.Length > 0 ? "&category=" + category : "") + (difficulty.Length > 0 ? "&difficulty=" + difficulty : "");
+        return delegate
+        {
+            List<Question> got = null;
+            string problem = null;
+            try { got = Parse(Fetch(url)); }
+            catch (Exception error) { problem = error.Message; }
+            List<string> say = new List<string>();
+            lock (gate)
+            {
+                if (mine != round || !loading) return;
+                if (got == null || got.Count == 0)
+                {
+                    if (problem != null) capri.Log("Open Trivia DB: " + problem);
+                    got = Own(key, count);
+                    say.Add("Can't reach the trivia server, so you get my own questions.");
+                }
+                foreach (Question question in got) Shuffle(question.Options);
+                questions = got;
+                at = score = 0;
+                hinted = false;
+                loading = false;
+                say.Add(Asked(questions[0]));
+            }
+            foreach (string line in say) capri.Say(line);
+        };
+    }
+
+    private void NextQuestion(List<string> lines)
+    {
+        at++;
+        hinted = false;
+        if (at >= questions.Count) { Finish(lines, false); return; }
+        lines.Add(Asked(questions[at]));
+    }
+
+    private void Finish(List<string> lines, bool early)
+    {
+        int asked = at;
+        string verdict;
+        if (asked == 0) verdict = "Didn't even answer one. Coward.";
+        else
+        {
+            double share = score / (double)asked;
+            verdict = "You got " + score + " out of " + asked + ". " + (share >= 1 ? "Perfect. Are you cheating? You're cheating." : share >= 0.7 ? "Not bad. I'm almost impressed." : share >= 0.4 ? "Middling. Very you." : "Yikes. Let's never speak of this.");
+            if (asked >= 3 && Best(topicKey, score, asked)) verdict += " New best for " + topic + "!";
+        }
+        lines.Add((early ? "Quiz stopped. " : "That's the quiz. ") + verdict);
+        questions = null;
+    }
+
+    private string Asked(Question question)
+    {
+        StringBuilder text = new StringBuilder("Question " + (questions.IndexOf(question) + 1) + " of " + questions.Count + ". " + question.Text);
+        for (int i = 0; i < question.Options.Count; i++)
+            if (!question.Hidden[i]) text.Append(" " + Letters[i] + ": " + question.Options[i] + ".");
+        string said = text.ToString();
+        return said.Length <= 500 ? said : said.Substring(0, 497) + "...";
+    }
+
+    private string Hint(Question question)
+    {
+        if (hinted) return "You already had your hint. Cheapskate.";
+        hinted = true;
+        List<int> wrong = new List<int>();
+        for (int i = 0; i < question.Options.Count; i++) if (i != question.Answer) wrong.Add(i);
+        wrong.RemoveAt((int)Next(0, wrong.Count - 1));
+        foreach (int i in wrong) question.Hidden[i] = true;
+        List<string> left = new List<string>();
+        for (int i = 0; i < question.Options.Count; i++) if (!question.Hidden[i]) left.Add(Letters[i] + ", " + question.Options[i]);
+        return "Fifty-fifty. It's " + string.Join(", or ", left) + ".";
+    }
+
+    // The option they meant, by letter ("B", "bee", "I think it's C") or by saying it ("Tokyo"), or -1.
+    private static int Picked(string said, Question question)
+    {
+        string bare = Filler.Replace(said.ToLowerInvariant(), "").Trim().Trim('.', ',', '!', '?', ' ');
+        bare = Regex.Replace(bare, @"[\s,]*(?:final\s+answer|please)$", "", Plain).Trim();
+        // Saying an option exactly wins first, so "four" is the answer 4, not option D.
+        string exact = Plainly(Numbers(bare));
+        for (int i = 0; i < question.Options.Count; i++) if (exact.Length > 0 && exact == Plainly(question.Options[i])) return i;
+        for (int i = 0; i < Spoken.Length && i < question.Options.Count; i++)
+            if (Array.IndexOf(Spoken[i], bare) >= 0 || bare == Letters[i].ToLowerInvariant() + " " + Plainly(question.Options[i]))
+                return i;
+        string heard = " " + Plainly(Numbers(said.ToLowerInvariant())) + " ";
+        int best = -1, longest = 0;
+        for (int i = 0; i < question.Options.Count; i++)
+        {
+            string option = Plainly(question.Options[i]), loose = Plainly(Regex.Replace(question.Options[i], @"^(?:the|a|an)\s+", "", Plain));
+            // "Shakespeare" for William Shakespeare, "Armstrong" for Neil Armstrong.
+            string[] words = option.Split(' ');
+            string last = words.Length >= 2 && words[words.Length - 1].Length >= 4 ? words[words.Length - 1] : "";
+            foreach (string form in new[] { option, loose, last })
+            {
+                if (form.Length < 1 || heard.IndexOf(" " + form + " ", StringComparison.Ordinal) < 0) continue;
+                if (form.Length > longest) { longest = form.Length; best = i; }
+                else if (form.Length == longest && best != i) best = -2;
+            }
+        }
+        return best >= 0 ? best : -1;
+    }
+
+    private static string Plainly(string text) { return Regex.Replace((text ?? "").ToLowerInvariant(), @"[^\p{L}\p{N}]+", " ").Trim(); }
+
+    // ---- Open Trivia DB ----
+
+    private static string Download(string url)
+    {
+        ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+        HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+        request.Timeout = request.ReadWriteTimeout = 8000;
+        request.UserAgent = "Capri Voice Trivia mod";
+        using (WebResponse response = request.GetResponse())
+        using (StreamReader reader = new StreamReader(response.GetResponseStream(), Encoding.UTF8))
+            return reader.ReadToEnd();
+    }
+
+    // With encode=url3986 every text is percent-encoded, so no quotes or escapes hide inside the JSON strings.
+    private static List<Question> Parse(string json)
+    {
+        List<Question> found = new List<Question>();
+        if (json == null || !Regex.IsMatch(json, "\"response_code\"\\s*:\\s*0\\b")) return found;
+        foreach (Match item in Regex.Matches(json, @"\{[^{}]*\}"))
+        {
+            string body = item.Value;
+            string text = Field(body, "question"), correct = Field(body, "correct_answer"), category = Field(body, "category");
+            Match wrongs = Regex.Match(body, "\"incorrect_answers\"\\s*:\\s*\\[([^\\]]*)\\]");
+            if (text == null || correct == null || !wrongs.Success) continue;
+            List<string> options = new List<string> { Uri.UnescapeDataString(correct).Trim() };
+            foreach (Match wrong in Regex.Matches(wrongs.Groups[1].Value, "\"([^\"]*)\"")) options.Add(Uri.UnescapeDataString(wrong.Groups[1].Value).Trim());
+            if (options.Count != 4) continue;
+            found.Add(new Question { Text = Uri.UnescapeDataString(text).Trim(), Correct = options[0], Options = options, Topic = category == null ? "" : Uri.UnescapeDataString(category) });
+        }
+        return found;
+    }
+
+    private static string Field(string body, string name)
+    {
+        Match field = Regex.Match(body, "\"" + name + "\"\\s*:\\s*\"([^\"]*)\"");
+        return field.Success ? field.Groups[1].Value : null;
+    }
+
+    // ---- Her own questions, for when the server can't be reached ----
+
+    private List<Question> Own(string key, int count)
+    {
+        List<Question> pool = new List<Question>(), rest = new List<Question>();
+        foreach (string row in Bank)
+        {
+            string[] parts = row.Split('|');
+            Question question = new Question { Topic = parts[0], Text = parts[1], Correct = parts[2], Options = new List<string> { parts[2], parts[3], parts[4], parts[5] } };
+            if (key == "general" || parts[0] == key) pool.Add(question);
+            else rest.Add(question);
+        }
+        Shuffle(pool);
+        Shuffle(rest);
+        pool.AddRange(rest);
+        return pool.GetRange(0, Math.Min(count, pool.Count));
+    }
+
+    private static readonly string[] Bank =
+    {
+        "general|How many days are in a leap year?|366|365|364|367",
+        "general|What is the largest ocean on Earth?|The Pacific Ocean|The Atlantic Ocean|The Indian Ocean|The Arctic Ocean",
+        "general|How many sides does a hexagon have?|6|5|7|8",
+        "general|What colour do you get by mixing blue and yellow paint?|Green|Purple|Orange|Brown",
+        "science|Which planet is known as the Red Planet?|Mars|Venus|Jupiter|Mercury",
+        "science|Which gas do plants take in from the air to make their food?|Carbon dioxide|Oxygen|Nitrogen|Helium",
+        "science|What is the chemical symbol for gold?|Au|Ag|Gd|Go",
+        "science|How many bones are in the adult human body?|206|186|212|230",
+        "science|What is the hardest natural substance?|Diamond|Quartz|Iron|Granite",
+        "geography|What is the capital of Japan?|Tokyo|Osaka|Kyoto|Nagoya",
+        "geography|What is the capital of Australia?|Canberra|Sydney|Melbourne|Perth",
+        "geography|What is the smallest country in the world by area?|Vatican City|Monaco|San Marino|Liechtenstein",
+        "geography|Mount Everest sits on the border of Nepal and which country?|China|India|Bhutan|Pakistan",
+        "games|In Minecraft, which block makes the frame of a Nether portal?|Obsidian|Cobblestone|Netherrack|Bedrock",
+        "games|In Super Mario games, which princess does Mario usually rescue?|Peach|Daisy|Zelda|Rosalina",
+        "games|Which company makes the PlayStation?|Sony|Microsoft|Nintendo|Sega",
+        "games|In Tetris, how many squares make up each piece?|4|3|5|6",
+        "games|In Pokemon, what type is Pikachu?|Electric|Fire|Normal|Fairy",
+        "anime|In Naruto, which village is Naruto from?|The Hidden Leaf|The Hidden Sand|The Hidden Mist|The Hidden Cloud",
+        "anime|In One Piece, what is the name of Luffy's crew?|The Straw Hat Pirates|The Red Hair Pirates|The Heart Pirates|The Whitebeard Pirates",
+        "anime|Which studio made Spirited Away?|Studio Ghibli|Kyoto Animation|Madhouse|Toei Animation",
+        "anime|In Dragon Ball, what is Goku's Saiyan name?|Kakarot|Vegeta|Raditz|Bardock",
+        "anime|In Death Note, which shinigami drops the notebook into the human world?|Ryuk|Rem|Sidoh|Gelus",
+        "history|In which year did World War II end?|1945|1944|1946|1939",
+        "history|Who was the first person to walk on the Moon?|Neil Armstrong|Buzz Aldrin|Yuri Gagarin|John Glenn",
+        "history|Which ancient civilisation built the pyramids of Giza?|The Egyptians|The Romans|The Greeks|The Persians",
+        "movies|In The Lion King, what is the name of Simba's father?|Mufasa|Scar|Rafiki|Pumbaa",
+        "movies|Which 1997 film is about a ship that hits an iceberg?|Titanic|Poseidon|Waterworld|Armageddon",
+        "music|How many strings does a standard guitar have?|6|4|5|7",
+        "music|How many keys does a standard piano have?|88|76|61|96"
+    };
+
+    // ---- Best scores ----
+
+    private bool Best(string key, int got, int asked)
+    {
+        Dictionary<string, string> bests = ReadBests();
+        string had;
+        double before = -1;
+        if (bests.TryGetValue(key, out had))
+        {
+            string[] parts = had.Split('/');
+            int a, b;
+            if (parts.Length == 2 && int.TryParse(parts[0], out a) && int.TryParse(parts[1], out b) && b > 0) before = a / (double)b;
+        }
+        if (got / (double)asked <= before) return false;
+        bests[key] = got + "/" + asked;
+        List<string> lines = new List<string>();
+        foreach (KeyValuePair<string, string> entry in bests) lines.Add(entry.Key + "=" + entry.Value);
+        try { File.WriteAllLines(bestFile, lines); }
+        catch (IOException error) { capri.Log(error.Message); }
+        catch (UnauthorizedAccessException error) { capri.Log(error.Message); }
+        return before >= 0 || got > 0;
+    }
+
+    private string Bests()
+    {
+        Dictionary<string, string> bests = ReadBests();
+        if (bests.Count == 0) return "No trivia scores yet. Say quiz me to fix that.";
+        List<string> parts = new List<string>();
+        foreach (KeyValuePair<string, string> entry in bests) parts.Add(entry.Key + " " + entry.Value.Replace("/", " out of "));
+        return "Your best trivia scores: " + string.Join(", ", parts) + ".";
+    }
+
+    private Dictionary<string, string> ReadBests()
+    {
+        Dictionary<string, string> bests = new Dictionary<string, string>();
+        try
+        {
+            if (File.Exists(bestFile))
+                foreach (string line in File.ReadAllLines(bestFile))
+                {
+                    int equals = line.IndexOf('=');
+                    if (equals > 0) bests[line.Substring(0, equals)] = line.Substring(equals + 1);
+                }
+        }
+        catch (IOException error) { capri.Log(error.Message); }
+        catch (UnauthorizedAccessException error) { capri.Log(error.Message); }
+        return bests;
+    }
+
+    // ---- Helpers ----
+
+    private long Next(long low, long high)
+    {
+        ulong range = (ulong)(high - low) + 1, limit = 4294967296UL - 4294967296UL % range, value;
+        byte[] bytes = new byte[4];
+        do
+        {
+            random.GetBytes(bytes);
+            value = BitConverter.ToUInt32(bytes, 0);
+        } while (value >= limit);
+        return low + (long)(value % range);
+    }
+
+    private void Shuffle<T>(List<T> items)
+    {
+        for (int i = items.Count - 1; i > 0; i--)
+        {
+            int j = (int)Next(0, i);
+            T swap = items[i];
+            items[i] = items[j];
+            items[j] = swap;
+        }
+    }
+
+    private string Pick(string[] lines) { return lines[(int)Next(0, lines.Length - 1)]; }
+
+    private static readonly Regex NumberWords = new Regex(
+        @"\b(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[\s-]+(?:one|two|three|four|five|six|seven|eight|nine)\b)?" +
+        @"|\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen)\b", Plain);
+    private static readonly string[] Small = { "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen" };
+    private static readonly string[] Tens = { "", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety" };
+
+    private static string Numbers(string text)
+    {
+        return NumberWords.Replace(text, delegate(Match word)
+        {
+            int total = 0;
+            foreach (string piece in Regex.Split(word.Value.ToLowerInvariant(), @"[\s-]+"))
+            {
+                int small = Array.IndexOf(Small, piece), tens = Array.IndexOf(Tens, piece);
+                if (small >= 0) total += small;
+                else if (tens >= 2) total += tens * 10;
+            }
+            return total.ToString();
+        });
+    }
+
+    private static string Count(int n)
+    {
+        if (n < Small.Length) return Small[n];
+        return n % 10 == 0 && n / 10 < Tens.Length ? Tens[n / 10] : n.ToString();
+    }
+
+    private static string Upper(string text) { return text.Length == 0 ? text : char.ToUpperInvariant(text[0]) + text.Substring(1); }
+}
