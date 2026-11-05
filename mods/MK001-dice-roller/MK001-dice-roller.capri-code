@@ -1,0 +1,648 @@
+// capri-mod: 1
+// id: mk001-dice-roller
+// name: MK001 Dice Roller
+// version: 1.0.7
+// author: Mirit0
+// description: Flip a coin, Roll dice: D4/D6/D8/D12/D20/D100
+
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Text;
+using System.Security.Cryptography;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Windows.Forms;
+using CapriDesktop;
+
+public sealed class DiceRoller : ICapriMod
+{
+    private const int PendingLimit = 8;
+    private readonly object gate = new object();
+    private readonly Queue<Roll> pending = new Queue<Roll>();
+    private RandomNumberGenerator rng = RandomNumberGenerator.Create();
+    private readonly byte[] randomBytes = new byte[4];
+    private ICapriHost host;
+    private Thread worker;
+    private RollWindow active;
+    private bool stopped = true;
+    private int generation;
+    private readonly Queue<string> recentReplies = new Queue<string>();
+
+    private sealed class Roll
+    {
+        internal int Sides;
+        internal int Count;
+        internal int[] Values;
+        internal int[] Tens;
+        internal int[] Units;
+        internal string Purpose;
+    }
+
+    public void Start(ICapriHost capri)
+    {
+        lock (gate)
+        {
+            generation++;
+            if (rng == null) rng = RandomNumberGenerator.Create();
+            host = capri;
+            stopped = false;
+        }
+        capri.Log("MK001 Dice Roller 1.0.7 ready (D4/D6/D8/D10/D12/D20/D100 + coin).");
+    }
+
+    public bool Heard(string words)
+    {
+        Roll roll;
+        if (!TryParse(words, out roll)) return false;
+        ICapriHost fullQueueHost = null;
+        lock (gate)
+        {
+            if (stopped) return false;
+            if (pending.Count >= PendingLimit) fullQueueHost = host;
+            else
+            {
+                roll.Values = new int[roll.Count];
+                if (roll.Sides == 100) { roll.Tens = new int[roll.Count]; roll.Units = new int[roll.Count]; }
+                for (int i = 0; i < roll.Count; i++)
+                {
+                    if (roll.Sides == 100)
+                    {
+                        roll.Tens[i] = Uniform(10);
+                        roll.Units[i] = Uniform(10);
+                        int p = roll.Tens[i] * 10 + roll.Units[i];
+                        roll.Values[i] = p == 0 ? 100 : p;
+                    }
+                    else roll.Values[i] = Uniform(roll.Sides == 0 ? 2 : roll.Sides) + (roll.Sides == 0 ? 0 : 1);
+                }
+                pending.Enqueue(roll);
+                if (worker == null)
+                {
+                    int epoch = generation;
+                    worker = new Thread(new ThreadStart(delegate { Work(epoch); }));
+                    worker.IsBackground = true;
+                    worker.Name = "Capri Dice Roller animation";
+                    worker.SetApartmentState(ApartmentState.STA);
+                    worker.Start();
+                }
+            }
+        }
+        if (fullQueueHost != null) fullQueueHost.Say("Dice queue's full. Give the little gremlins a second.");
+        return true;
+    }
+
+    public void Stop()
+    {
+        RollWindow window;
+        lock (gate)
+        {
+            stopped = true;
+            generation++;
+            pending.Clear();
+            window = active;
+            active = null;
+            worker = null;
+            host = null;
+            if (rng != null) { rng.Dispose(); rng = null; }
+        }
+        if (window != null)
+            try { if (window.IsHandleCreated && !window.IsDisposed) window.BeginInvoke(new MethodInvoker(window.CancelRoll)); }
+            catch (InvalidOperationException) { }
+    }
+
+    private int Uniform(int n)
+    {
+        ulong limit = 4294967296UL - 4294967296UL % (ulong)n, v;
+        do { rng.GetBytes(randomBytes); v = BitConverter.ToUInt32(randomBytes, 0); } while (v >= limit);
+        return (int)(v % (ulong)n);
+    }
+
+    private const string SW = @"(?:one[\s-]*hundred|1[\s-]*hundred|hundred|100|twenty|20|twelve|12|ten|10|eight|8|six|6|four|4)";
+    private static readonly Regex RxNotation  = new Regex(@"(?<![\w])(?:(?<count>[1-4]|one|two|three|four)\s*)?(?:d|dee|di)[\s-]*(?<sides>" + SW + @")\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    private static readonly Regex RxSided     = new Regex(@"(?<![\w])(?<sides>" + SW + @")[\s-]+sided[\s-]+(?:die|dice)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    private static readonly Regex RxPerc      = new Regex(@"(?<![\w])percentile[\s-]+(?:die|dice)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    private static readonly Regex RxBare      = new Regex(@"(?<![\w])(?:roll|throw|toss|give|do|cast)\s+(?:(?:me|us)\s+)?(?:(?:a|an|the)\s+)?(?<sides>" + SW + @")\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    private static readonly Regex RxCoin      = new Regex(@"(?<![\w])(?:(?:flip|toss|flip\s*(?:/|or)\s*toss)\s+(?:(?:me|us)\s+)?(?:(?:a|the|my|your|this|that|one)\s+)?coin|coin[\s-]+flip|heads\s+or\s+tails)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    private static readonly Regex RxIntent    = new Regex(@"\b(?:roll|rolling|throw|toss|flip|give|do|use|spin|cast|need|want|try|make|pick|choose|please|can|could|would|will)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    private static readonly Regex RxReason    = new Regex(@"^(?:for|to\s+check|to\s+test|to\s+decide|to\s+see|to\s+determine)\s+(?<reason>.+)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    private static readonly Regex RxBadCount  = new Regex(@"(?:^|[^\w])(?:[0-9]+|zero|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    private static readonly Regex RxAfterBare = new Regex(@"^\s*(?:d|dee|di)(?:[\s-]|[0-9])", RegexOptions.IgnoreCase);
+
+    private static int ReadSides(string t)
+    {
+        switch (Regex.Replace(t.ToLowerInvariant(), @"[\s-]", ""))
+        {
+            case "4": case "four":        return 4;
+            case "6": case "six":         return 6;
+            case "8": case "eight":       return 8;
+            case "10": case "ten":        return 10;
+            case "12": case "twelve":     return 12;
+            case "20": case "twenty":     return 20;
+            case "100": case "onehundred": case "1hundred": case "hundred": return 100;
+        }
+        return -1;
+    }
+
+    private static int ReadCount(Group g)
+    {
+        if (!g.Success) return 1;
+        string v = g.Value.ToLowerInvariant();
+        return v == "one" ? 1 : v == "two" ? 2 : v == "three" ? 3 : v == "four" ? 4 : int.Parse(v);
+    }
+
+    private static bool TryParse(string words, out Roll roll)
+    {
+        roll = null;
+        if (string.IsNullOrWhiteSpace(words)) return false;
+        string input = Regex.Replace(words.Trim(), @"\s+", " ");
+        Match mn = RxNotation.Match(input);
+        if (mn.Success && RxBadCount.IsMatch(input.Substring(0, mn.Index))) mn = Match.Empty;
+        Match ms = RxSided.Match(input);
+        Match mp = RxPerc.Match(input);
+        Match mc = RxCoin.Match(input);
+        Match mb = RxBare.Match(input);
+        if (ms.Success && !RxIntent.IsMatch(input.Substring(0, ms.Index))) ms = Match.Empty;
+        if (mp.Success && !RxIntent.IsMatch(input.Substring(0, mp.Index))) mp = Match.Empty;
+        Match picked = Match.Empty; int kind = -1;
+        if (mn.Success) { picked = mn; kind = 1; }
+        if (ms.Success && (!picked.Success || ms.Index < picked.Index)) { picked = ms; kind = 2; }
+        if (mp.Success && (!picked.Success || mp.Index < picked.Index)) { picked = mp; kind = 3; }
+        if (mc.Success && (!picked.Success || mc.Index < picked.Index)) { picked = mc; kind = 0; }
+        if (!picked.Success && mb.Success && !RxAfterBare.IsMatch(input.Substring(mb.Index + mb.Length))) { picked = mb; kind = 4; }
+        if (!picked.Success) return false;
+        int sides = kind == 0 ? 0 : kind == 3 ? 100 : ReadSides(picked.Groups["sides"].Value);
+        if (sides != 0 && sides != 4 && sides != 6 && sides != 8 && sides != 10 && sides != 12 && sides != 20 && sides != 100) return false;
+        int count = kind == 1 ? ReadCount(picked.Groups["count"]) : 1;
+        string tail = input.Substring(picked.Index + picked.Length);
+        roll = new Roll { Sides = sides, Count = count, Purpose = ParsePurpose(tail) };
+        return true;
+    }
+
+    private static string ParsePurpose(string tail)
+    {
+        tail = Regex.Replace(tail.Trim().TrimStart(',', ':', ';', '-', '.', '!', '?').Trim(), @"^sided[\s-]+(?:die|dice)\b\s*", "", RegexOptions.IgnoreCase);
+        Match r = RxReason.Match(tail);
+        if (!r.Success) return "";
+        string v = Regex.Replace(r.Groups["reason"].Value, @"(?:[,;.!?]+|\s+(?:please|thanks|thank you|now))+$", "", RegexOptions.IgnoreCase).Trim();
+        if (v.Equals("me", StringComparison.OrdinalIgnoreCase) || v.Equals("us", StringComparison.OrdinalIgnoreCase) || v.Equals("me please", StringComparison.OrdinalIgnoreCase)) return "";
+        return v.Length > 64 ? v.Substring(0, 64).TrimEnd() : v;
+    }
+
+    private void Work(int epoch)
+    {
+        Thread mine = Thread.CurrentThread;
+        try
+        {
+            while (true)
+            {
+                Roll roll;
+                lock (gate)
+                {
+                    if (stopped || generation != epoch || pending.Count == 0) { if (worker == mine) worker = null; return; }
+                    roll = pending.Dequeue();
+                }
+                RollWindow window = null; bool completed = false;
+                try
+                {
+                    window = new RollWindow(roll, delegate { return IsCancelled(epoch); });
+                    lock (gate) { if (stopped || generation != epoch) { window.Dispose(); return; } active = window; }
+                    using (window) { window.ShowDialog(); completed = window.Completed; }
+                }
+                catch (Exception e) { lock (gate) if (!stopped && generation == epoch && host != null) host.Log("Dice animation failed: " + e); }
+                finally { lock (gate) if (active == window) active = null; }
+                if (completed) lock (gate) { if (!stopped && generation == epoch && host != null) host.Say(Reply(roll)); }
+            }
+        }
+        catch (Exception e) { lock (gate) if (!stopped && generation == epoch && host != null) host.Log("Dice worker stopped: " + e); }
+        finally { lock (gate) if (worker == mine) worker = null; }
+    }
+
+    private bool IsCancelled(int epoch) { lock (gate) return stopped || generation != epoch; }
+
+    private static readonly string[][] Replies = new string[][]{
+        new string[]{"Ouch. That die woke up and chose disrespect.","Ha! The absolute floor. Impressive in the worst way.","That wasn't a roll. That was a personal attack.","Well, gravity certainly had opinions.","I felt that one in at least three of my heads.","Even the die looks embarrassed.","Pfft. You really rolled that low.","I would accuse it of cheating, but the evidence is tragic.","Okay. New record in spectacularly unfortunate.","That number needs a tiny apology note.","The die didn't even try to hide the betrayal.","Oh, that's evil. I respect the audacity, not the result.","The universe just made a very small, very rude joke.","I'm laughing with you. Mostly.","That roll has the energy of a door slamming shut.","A masterpiece of bad luck. Frame it.","Don't feel sad choom, you'll do better next time.","Dont go cyberpsycho on me"},
+        new string[]{"Ehh. Not exactly terrifying.","Could've been worse. Don't ask me how.","That die is testing your patience for sport.","Oof, that's a little sad. Just a little.","I wouldn't brag about that one.","Okay, the dice aren't on our side yet.","That landed with all the confidence of a wet sock.","You're gonna make me do the dramatic wince, huh?","Not the number I was rooting for.","I saw it wobble. It knew what it was doing.","Mmm. You may want a backup plan.","The die has a cruel little sense of humor.","That's not failure. It's a very enthusiastic warning.","A bold contribution to the chaos, unfortunately.","I think the die just smirked at you.","The die just called you a gonk.","Are we sure Arasaka didnt rig this thing?"},
+        new string[]{"That is aggressively middle-of-the-road.","Solid. Not dramatic, but solid.","Well, that was suspiciously normal.","I'll allow it. This time.","A perfectly respectable amount of trouble.","Not bad. You're keeping the suspense alive.","The die picked the sensible option. How boring.","Look at that. Completely average","Huh. The universe is being reasonable for once.","Somewhere in the middle of a beautiful mess.","Okay. We can work with this.","No fireworks, no funeral. Interesting.","The die took the scenic route to average.","I expected chaos. We got paperwork.","You survived the dice's little mood swing."},
+        new string[]{"Ooh, now that's got some bite.","Ha! I like where this is going.","Okay, show-off. I see you.","That's the kind of number that starts trouble.","The dice finally decided to cooperate.","Oh, that is dangerously pretty.","Someone's having an excellent little moment.","I knew you had a good roll hiding in there.","That's a respectable amount of menace.","Nice. Don't get too smug. That's my job.","Ooh, I felt that click into place.","That's the sort of luck that makes enemies nervous.","Yeah, I like that. Keep the grin.","Now this is the fun kind of chaos.","Preem result. The die finally has taste.","Ha. The universe blinked first."},
+        new string[]{"Oh, that's gorgeous.","Ha! Perfect. Absolutely shameless.","The top of the die. You ridiculous show-off.","I love it when probability gets dramatic.","Okay, that deserves a wicked little grin.","The die took one look at you and surrendered.","No notes. That was beautiful choom","Whoever's on the other side of that should worry.","I am trying not to gloat. Failing beautifully.","Ha! The best possible result. Of course you'd make a scene.","One of my minds just cheered. Loudly.","That's absurdly good. I approve.","You and that die are dangerous together.","I want that roll framed and hung on a wall.","Oh, the dice gods are showing off now.","Lets hope this isn't a BD"}
+    };
+
+    private static readonly string[][][] PurposeReplies = new string[][][]{
+        new string[][]{
+            new string[]{"Last out of the gate. Bold strategy.","The fight might start before you blink.","The initiative order just laughed at you.","Well, surprise is definitely off the menu."},
+            new string[]{"Not exactly a lightning entrance.","You'll get your turn. Eventually.","Somebody else gets to make the first mess.","That start could use a little more speed."},
+            new string[]{"Not first, not last. Suspiciously civilized.","A decent place to enter the chaos.","At least you've got time to watch the opening move.","Initiative with just a hint of suspense."},
+            new string[]{"Oh, you're moving before most of them.","Fast hands. I like it.","You might get the first good surprise in.","Someone's about to steal the spotlight."},
+            new string[]{"First into the chaos! That's my kind of entrance.","Oh, they're not seeing that opening move coming.","You're practically outrunning the dice.","That initiative result is pure swagger."}
+        },
+        new string[][]{
+            new string[]{"That hit was more of a strongly worded suggestion.","The target might not have noticed.","I think the enemy's health bar just yawned.","Oof. That attack needs a second opinion."},
+            new string[]{"A scratch, but at least it's yours.","That'll sting. A little.","Not exactly an explosion. More of a pop.","Could've hit harder. I was rooting for harder."},
+            new string[]{"Okay, that's a respectable dent.","Not bad. They'll remember you were there.","A decent hit. I'll take it.","Now that's an actual inconvenience for them."},
+            new string[]{"Ooh, someone's gonna feel that.","Ha! That's going to leave a mark.","That health bar just got nervous.","Now that's the damage I wanted to see."},
+            new string[]{"Oh, that hit was vicious. Beautiful.","Maximum damage! That's gotta hurt.","That health bar is having a very bad day.","You absolutely demolished that roll."}
+        },
+        new string[][]{
+            new string[]{"Luck called. It went straight to voicemail.","The universe is being petty today.","That luck roll needs a hug.","Oh, fate is in a nasty little mood."},
+            new string[]{"Luck's playing hard to get.","I wouldn't test fate twice in a row.","The universe gave you a very small nod.","Your lucky streak seems to be on break."},
+            new string[]{"Fate is keeping its cards close.","Not cursed, not blessed.","The universe hasn't decided whether it likes you.","Luck's sitting on the fence, watching."},
+            new string[]{"Oh, fate's finally flirting with you.","That's some genuinely nice luck.","Okay, the odds are giving you a wink.","The universe is being unusually generous."},
+            new string[]{"That's ridiculous luck. I'm almost jealous.","Oh, fate definitely has a favorite.","Perfect luck! Now I want to see what you do with it.","The universe just handed you the good stuff."}
+        }
+    };
+
+    private static readonly string[][] DieReplies = new string[][]{
+        new string[]{"Tiny pyramid. Massive attitude.","Four faces and a whole lot of nerve.","That little spike is awfully smug.","Who knew a pyramid could cause this much drama?","The tiny one has spoken. Loudly."},
+        new string[]{"The classic cube still knows how to cause trouble.","Six little faces. One big opinion.","Old-school dice chaos. Love that.","The cube really took its sweet time.","Somehow a square-faced object still looks smug."},
+        new string[]{"Eight faces and no sense of mercy.","That pointy thing has impeccable timing.","Ooh, the octahedron picked a side.","I swear that die enjoys suspense.","Eight little chances to make mischief."},
+        new string[]{"Ten faces. Zero chill.","That D10 is a little drama machine.","The trapezohedron has opinions, apparently.","That one spun like it had somewhere to be.","Ten sides and a very specific grudge."},
+        new string[]{"Twelve faces of pure audacity.","That dodecahedron has a flair for suspense.","The D12 is such a show-off.","Twelve possible exits. It chose that one.","That one's practically a tiny sculpture of chaos."},
+        new string[]{"Twenty faces, one spectacular decision.","The D20 just made it personal.","There goes the twenty-sided troublemaker.","Classic D20 theatrics. Gorgeous.","Twenty chances to stir the pot."},
+        new string[]{"Two little percentile dice, double the attitude.","That percentile pair has a flair for drama.","Hundred-way chaos. I approve.","The tens and units teamed up on you.","A hundred possibilities and a very opinionated landing."}
+    };
+
+    private static readonly string[] HeadsReplies = new string[]{"Ha! The shiny side wins.","Heads. A tiny crown for a tiny decision.","The coin has spoken. Very smugly.","Heads it is. No rewrites.","Well, look who landed face-up.","That's one decisive little piece of metal.","Heads. Fate has an attitude today.","The coin made its choice. I like the confidence.","Heads. And somehow it looks pleased with itself.","The little round troublemaker picked heads.","Heads wins this round. Dramatic, right?","Hah, the coin didn't even hesitate."};
+    private static readonly string[] TailsReplies = new string[]{"Tails. A fine little twist of fate.","Ha! The other side gets its moment.","Tails it is. Argue with the coin, not me.","Well, the coin's feeling contrary.","Tails. The universe picked the plot twist.","There you go. A tiny metal verdict.","Tails wins. No sneaky do-overs.","The coin flipped its way into drama again.","Tails. I bet you almost called heads.","That little disc really committed to tails.","Tails. Simple, chaotic, beautiful.","Hah, gravity loves a dramatic ending."};
+
+    private static int DieIndex(int s) { switch(s){case 4:return 0;case 6:return 1;case 8:return 2;case 10:return 3;case 12:return 4;case 20:return 5;default:return 6;} }
+
+    private string Reply(Roll roll)
+    {
+        if (roll.Sides == 0)
+        {
+            bool h = roll.Values[0] == 0;
+            return (h ? "Heads" : "Tails") + (roll.Purpose.Length > 0 ? " for " + roll.Purpose : "") + ". " + Choose(h ? HeadsReplies : TailsReplies);
+        }
+        int total = 0; for (int i = 0; i < roll.Count; i++) total += roll.Values[i];
+        string beg;
+        if (roll.Count == 1)
+        {
+            string num = roll.Values[0].ToString();
+            switch (Uniform(4)) { case 0: beg = num + " on the D" + roll.Sides; break; case 1: beg = "D" + roll.Sides + " landed on " + num; break; case 2: beg = "D" + roll.Sides + ": " + num; break; default: beg = "Got " + num + " on the D" + roll.Sides; break; }
+            if (roll.Purpose.Length > 0) beg += " for " + roll.Purpose;
+            beg += ".";
+        }
+        else
+        {
+            beg = roll.Count + "d" + roll.Sides + ": ";
+            for (int i = 0; i < roll.Count; i++) beg += (i == 0 ? "" : i == roll.Count - 1 ? " and " : ", ") + roll.Values[i];
+            beg += ". Total: " + total + (roll.Purpose.Length > 0 ? " for " + roll.Purpose : "") + ".";
+        }
+        int min = roll.Count, max = roll.Count * roll.Sides, diff = max - min;
+        int tier = total == min ? 0 : total == max ? 4 : (total - min) * 100 <= diff * 30 ? 1 : (total - min) * 100 >= diff * 75 ? 3 : 2;
+        string p = roll.Purpose.ToLowerInvariant();
+        int pt = p.Contains("initiative") ? 0 : p.Contains("damage") ? 1 : (p.Contains("luck") || p.Contains("lucky")) ? 2 : -1;
+        int style = Uniform(10);
+        string[] choices = pt >= 0 && style < 4 ? PurposeReplies[pt][tier] : style >= 8 ? DieReplies[DieIndex(roll.Sides)] : Replies[tier];
+        return beg + " " + Choose(choices);
+    }
+
+    private string Choose(string[] c)
+    {
+        int first = Uniform(c.Length), chosen = first;
+        for (int i = 0; i < c.Length; i++) { int ix = (first + i) % c.Length; if (!recentReplies.Contains(c[ix])) { chosen = ix; break; } }
+        string prev = ""; foreach (string s in recentReplies) prev = s;
+        if (c.Length > 1 && c[chosen] == prev) for (int i = 1; i < c.Length; i++) if (c[(chosen + i) % c.Length] != prev) { chosen = (chosen + i) % c.Length; break; }
+        string r = c[chosen]; recentReplies.Enqueue(r); while (recentReplies.Count > 12) recentReplies.Dequeue(); return r;
+    }
+
+    private struct V3
+    {
+        internal double X, Y, Z;
+        internal V3(double x, double y, double z) { X = x; Y = y; Z = z; }
+        public static V3 operator +(V3 a, V3 b) { return new V3(a.X+b.X,a.Y+b.Y,a.Z+b.Z); }
+        public static V3 operator -(V3 a, V3 b) { return new V3(a.X-b.X,a.Y-b.Y,a.Z-b.Z); }
+        public static V3 operator *(V3 a, double f) { return new V3(a.X*f,a.Y*f,a.Z*f); }
+        internal static double Dot(V3 a, V3 b) { return a.X*b.X+a.Y*b.Y+a.Z*b.Z; }
+        internal static V3 Cross(V3 a, V3 b) { return new V3(a.Y*b.Z-a.Z*b.Y,a.Z*b.X-a.X*b.Z,a.X*b.Y-a.Y*b.X); }
+        internal V3 Unit() { double d=Math.Sqrt(X*X+Y*Y+Z*Z); return d>0?this*(1.0/d):this; }
+    }
+
+    private struct Q
+    {
+        internal double W, X, Y, Z;
+        internal Q(double w, double x, double y, double z) { W=w;X=x;Y=y;Z=z; }
+        internal static Q Identity { get { return new Q(1,0,0,0); } }
+        public static Q operator *(Q a, Q b) { return new Q(a.W*b.W-a.X*b.X-a.Y*b.Y-a.Z*b.Z,a.W*b.X+a.X*b.W+a.Y*b.Z-a.Z*b.Y,a.W*b.Y-a.X*b.Z+a.Y*b.W+a.Z*b.X,a.W*b.Z+a.X*b.Y-a.Y*b.X+a.Z*b.W); }
+        internal Q Unit() { double d=Math.Sqrt(W*W+X*X+Y*Y+Z*Z); return d>0?new Q(W/d,X/d,Y/d,Z/d):Identity; }
+        internal static Q AxisAngle(V3 axis, double a) { axis=axis.Unit(); double s=Math.Sin(a/2); return new Q(Math.Cos(a/2),axis.X*s,axis.Y*s,axis.Z*s); }
+        internal static Q Euler(double x, double y, double z) { return AxisAngle(new V3(0,0,1),z)*AxisAngle(new V3(0,1,0),y)*AxisAngle(new V3(1,0,0),x); }
+        internal V3 Apply(V3 p) { V3 v=new V3(X,Y,Z),t=V3.Cross(v,p)*2; return p+t*W+V3.Cross(v,t); }
+        internal static Q Between(V3 from, V3 to)
+        {
+            V3 a=from.Unit(),b=to.Unit(); double d=V3.Dot(a,b);
+            if(d>0.999999999)return Identity;
+            if(d<-0.999999999){V3 seed=Math.Abs(a.X)<0.8?new V3(1,0,0):new V3(0,1,0);return AxisAngle(V3.Cross(a,seed),Math.PI);}
+            V3 c=V3.Cross(a,b);return new Q(1+d,c.X,c.Y,c.Z).Unit();
+        }
+        internal static Q Slerp(Q a, Q b, double t)
+        {
+            double dot=a.W*b.W+a.X*b.X+a.Y*b.Y+a.Z*b.Z;
+            if(dot<0){b=new Q(-b.W,-b.X,-b.Y,-b.Z);dot=-dot;}
+            double ka=1-t,kb=t;
+            if(dot<0.9995){dot=Math.Max(-1,Math.Min(1,dot));double th=Math.Acos(dot),de=Math.Sin(th);ka=Math.Sin((1-t)*th)/de;kb=Math.Sin(t*th)/de;}
+            return new Q(ka*a.W+kb*b.W,ka*a.X+kb*b.X,ka*a.Y+kb*b.Y,ka*a.Z+kb*b.Z).Unit();
+        }
+    }
+
+    private const double SettleStart = 1.13, SettleEnd = 1.86;
+    private static double Angle(double t, double phase, double velocity)
+    {
+        double f=Math.Max(0,Math.Min(1,t/SettleEnd));
+        return phase+velocity*SettleEnd*(1-Math.Pow(1-f,3))/3+Math.Sin(t*27)*0.07*Math.Pow(1-f,2);
+    }
+    private static Q TumbleRotation(double t, int slot) { return Q.Euler(Angle(t,0.35+slot*.41,13.6+slot*.7),Angle(t,0.55+slot*.33,18.3+slot*.4),Angle(t,0.12+slot*.18,11.4+slot*.5)); }
+
+    private sealed class Mesh { internal V3[] Vertices; internal int[][] Faces; }
+
+    private static Mesh Make(V3[] verts, int[][] faces)
+    {
+        double max=0;
+        for(int i=0;i<verts.Length;i++){double l=Math.Sqrt(V3.Dot(verts[i],verts[i]));if(l>max)max=l;}
+        for(int i=0;i<verts.Length;i++)verts[i]=verts[i]*(1.0/max);
+        for(int i=0;i<faces.Length;i++)
+        {
+            int[]f=faces[i];V3 a=verts[f[0]],b=verts[f[1]],c=verts[f[2]],ctr=new V3(0,0,0);
+            foreach(int k in f)ctr+=verts[k];
+            if(V3.Dot(V3.Cross(b-a,c-a),ctr)<0)Array.Reverse(f);
+        }
+        return new Mesh{Vertices=verts,Faces=faces};
+    }
+
+    private static Mesh Tetra(){return Make(new V3[]{new V3(1,1,1),new V3(-1,-1,1),new V3(-1,1,-1),new V3(1,-1,-1)},new int[][]{new int[]{0,1,2},new int[]{0,3,1},new int[]{0,2,3},new int[]{1,3,2}});}
+    private static Mesh Cube(){return Make(new V3[]{new V3(-1,-1,-1),new V3(1,-1,-1),new V3(1,1,-1),new V3(-1,1,-1),new V3(-1,-1,1),new V3(1,-1,1),new V3(1,1,1),new V3(-1,1,1)},new int[][]{new int[]{0,1,2,3},new int[]{4,7,6,5},new int[]{0,4,5,1},new int[]{1,5,6,2},new int[]{2,6,7,3},new int[]{3,7,4,0}});}
+    private static Mesh Octa(){V3[]a=new V3[]{new V3(1,0,0),new V3(-1,0,0),new V3(0,1,0),new V3(0,-1,0),new V3(0,0,1),new V3(0,0,-1)};return Make(a,new int[][]{new int[]{4,0,2},new int[]{4,2,1},new int[]{4,1,3},new int[]{4,3,0},new int[]{5,2,0},new int[]{5,1,2},new int[]{5,3,1},new int[]{5,0,3}});}
+    private static Mesh Ten()
+    {
+        V3[]v=new V3[12];double apex=1.6,rZ=apex*(1-Math.Cos(Math.PI/5))/(1+Math.Cos(Math.PI/5));
+        v[0]=new V3(0,0,apex);v[1]=new V3(0,0,-apex);
+        for(int i=0;i<5;i++){double a=i*Math.PI*2/5;v[2+i]=new V3(Math.Cos(a),Math.Sin(a),rZ);v[7+i]=new V3(Math.Cos(a+Math.PI/5),Math.Sin(a+Math.PI/5),-rZ);}
+        int[][]f=new int[10][];for(int i=0;i<5;i++){f[i]=new int[]{0,2+i,7+i,2+(i+1)%5};f[5+i]=new int[]{1,7+i,2+(i+1)%5,7+(i+1)%5};}
+        return Make(v,f);
+    }
+    private static Mesh Icosa()
+    {
+        double p=(1+Math.Sqrt(5))/2;
+        V3[]v=new V3[]{new V3(0,1,p),new V3(0,-1,p),new V3(0,1,-p),new V3(0,-1,-p),new V3(1,p,0),new V3(-1,p,0),new V3(1,-p,0),new V3(-1,-p,0),new V3(p,0,1),new V3(-p,0,1),new V3(p,0,-1),new V3(-p,0,-1)};
+        double smallest=double.MaxValue;
+        for(int i=0;i<v.Length;i++)for(int j=i+1;j<v.Length;j++){double d=V3.Dot(v[i]-v[j],v[i]-v[j]);if(d<smallest)smallest=d;}
+        List<int[]> faces=new List<int[]>();
+        for(int i=0;i<v.Length;i++)for(int j=i+1;j<v.Length;j++)for(int k=j+1;k<v.Length;k++)
+        {double a=V3.Dot(v[i]-v[j],v[i]-v[j]),b=V3.Dot(v[i]-v[k],v[i]-v[k]),c=V3.Dot(v[j]-v[k],v[j]-v[k]);if(Math.Abs(a-smallest)<0.0001&&Math.Abs(b-smallest)<0.0001&&Math.Abs(c-smallest)<0.0001)faces.Add(new int[]{i,j,k});}
+        return Make(v,faces.ToArray());
+    }
+    private static Mesh Dodeca(Mesh ico)
+    {
+        V3[]vert=new V3[ico.Faces.Length];
+        for(int i=0;i<ico.Faces.Length;i++){int[]t=ico.Faces[i];vert[i]=(ico.Vertices[t[0]]+ico.Vertices[t[1]]+ico.Vertices[t[2]])*(1.0/3);}
+        int[][]faces=new int[ico.Vertices.Length][];
+        for(int i=0;i<ico.Vertices.Length;i++)
+        {
+            List<int> touching=new List<int>();
+            for(int j=0;j<ico.Faces.Length;j++)foreach(int k in ico.Faces[j])if(k==i){touching.Add(j);break;}
+            V3 n=ico.Vertices[i].Unit(),axis=Math.Abs(n.Z)<0.8?new V3(0,0,1):new V3(0,1,0);
+            V3 right=V3.Cross(axis,n).Unit(),up=V3.Cross(n,right);
+            for(int a=0;a<touching.Count;a++)for(int b=a+1;b<touching.Count;b++)
+            {V3 u=vert[touching[a]],vv=vert[touching[b]];if(Math.Atan2(V3.Dot(u,up),V3.Dot(u,right))>Math.Atan2(V3.Dot(vv,up),V3.Dot(vv,right))){int tmp=touching[a];touching[a]=touching[b];touching[b]=tmp;}}
+            faces[i]=touching.ToArray();
+        }
+        return Make(vert,faces);
+    }
+    private static readonly Mesh IcoMesh = Icosa();
+    private static readonly Mesh[] Models = new Mesh[]{Tetra(),Cube(),Octa(),Ten(),Dodeca(IcoMesh),IcoMesh};
+    private static Mesh ModelFor(int s){switch(s){case 4:return Models[0];case 6:return Models[1];case 8:return Models[2];case 10:return Models[3];case 12:return Models[4];default:return Models[5];}}
+
+    private sealed class RenderFace{internal PointF[]Points;internal bool Visible;internal double Depth,Brightness;internal float X,Y,Area;internal int Id;}
+    private sealed class DieView
+    {
+        internal Mesh Geometry;
+        internal V3[] Rotated;
+        internal RenderFace[] Faces;
+        internal int[] Order;
+        internal int TargetFace;
+        internal Q LandingStart, LandingEnd;
+        internal DieView(Mesh mesh, int chosenFace, int slot)
+        {
+            Geometry=mesh;TargetFace=chosenFace;
+            Rotated=new V3[mesh.Vertices.Length];
+            Faces=new RenderFace[mesh.Faces.Length];Order=new int[mesh.Faces.Length];
+            for(int i=0;i<Faces.Length;i++){Faces[i]=new RenderFace{Points=new PointF[mesh.Faces[i].Length],Id=i};Order[i]=i;}
+            int[]f=mesh.Faces[chosenFace];
+            V3 a=mesh.Vertices[f[0]],b=mesh.Vertices[f[1]],c=mesh.Vertices[f[2]];
+            V3 n=V3.Cross(b-a,c-a).Unit();
+            LandingStart=TumbleRotation(SettleStart,slot);
+            Q align=Q.Between(LandingStart.Apply(n),new V3(0,0,1));
+            Q front=align*LandingStart;
+            V3 edge=front.Apply(b-a);
+            LandingEnd=(Q.AxisAngle(new V3(0,0,1),-Math.Atan2(edge.Y,edge.X))*front).Unit();
+        }
+    }
+
+    private static readonly Color CpBg     = Color.FromArgb(255,  8,  2, 14);
+    private static readonly Color CpRed    = Color.FromArgb(255,220, 30, 55);
+    private static readonly Color CpCyan   = Color.FromArgb(255,  0,230,255);
+
+    private sealed class RollWindow : Form
+    {
+        private const double RevealAt = SettleEnd, EndAt = 2.88;
+        private readonly Roll roll;
+        private readonly Func<bool> wasStopped;
+        private readonly Stopwatch clock = new Stopwatch();
+        private readonly System.Windows.Forms.Timer tick = new System.Windows.Forms.Timer();
+        private readonly DieView[] dice;
+        private readonly Font fntHeader  = new Font("Courier New", 11, FontStyle.Bold);
+        private readonly Font fntFace    = new Font("Courier New", 13, FontStyle.Bold);
+        private readonly Font fntFaceSm  = new Font("Courier New", 10, FontStyle.Bold);
+        private readonly Font fntNumber  = new Font("Courier New", 22, FontStyle.Bold);
+        private readonly Font fntLabel   = new Font("Courier New",  9, FontStyle.Regular);
+        private readonly Pen penEdge     = new Pen(Color.FromArgb(220, 220, 30, 55), 1.6f);
+        private readonly Pen penHalo     = new Pen(Color.FromArgb( 50, 220, 30, 55), 6f);
+        private readonly Pen penSep      = new Pen(Color.FromArgb( 90, 180, 20, 40), 1f);
+        private readonly Pen penEdgeCyan = new Pen(Color.FromArgb(200,   0,230,255), 1.4f);
+        private readonly Pen penHaloCyan = new Pen(Color.FromArgb( 45,   0,200,255), 5f);
+        private readonly SolidBrush[] bFaceRed  = new SolidBrush[9];
+        private readonly SolidBrush[] bFaceCyan = new SolidBrush[9];
+        private readonly SolidBrush bWhite   = new SolidBrush(Color.FromArgb(255,255,255,255));
+        private readonly SolidBrush bSecond  = new SolidBrush(Color.FromArgb(200,220, 30, 55));
+        private readonly SolidBrush bSecCyan = new SolidBrush(Color.FromArgb(180,  0,230,255));
+        private readonly SolidBrush bDark    = new SolidBrush(Color.FromArgb(220,  8,  2, 14));
+        private bool cheap;
+        internal bool Completed { get; private set; }
+
+        internal RollWindow(Roll req, Func<bool> cancel)
+        {
+            roll=req;wasStopped=cancel;
+            int n=req.Sides==100?req.Count*2:req.Count;
+            dice=new DieView[req.Sides==0?0:n];
+            for(int i=0;i<dice.Length;i++)
+            {
+                int which=req.Sides==100?i/2:i;
+                int face=req.Sides==100?(i%2==0?req.Tens[which]:req.Units[which]):req.Values[which]-1;
+                dice[i]=new DieView(ModelFor(req.Sides==100?10:req.Sides),face,i);
+            }
+            for(int i=0;i<9;i++){bFaceRed[i]=new SolidBrush(Color.FromArgb(255,60+i*18,5+i*4,10+i*5));bFaceCyan[i]=new SolidBrush(Color.FromArgb(255,0+i*5,40+i*20,50+i*22));}
+            int cols=n>4?(n+1)/2:n;
+            int w=req.Sides==0?320:Math.Max(320,Math.Min(740,cols*164+80));
+            ClientSize=new Size(w,n>4?440:266);
+            StartPosition=FormStartPosition.CenterScreen;
+            FormBorderStyle=FormBorderStyle.None;
+            ShowInTaskbar=false;
+            TopMost=false;
+            BackColor=CpBg;
+            Opacity=0.97;
+            SetStyle(ControlStyles.AllPaintingInWmPaint|ControlStyles.UserPaint|ControlStyles.OptimizedDoubleBuffer,true);
+            tick.Interval=16;
+            tick.Tick+=OnTick;
+            Shown+=delegate{if(wasStopped()){CancelRoll();return;}clock.Start();tick.Start();Invalidate();};
+        }
+
+        protected override bool ShowWithoutActivation { get { return true; } }
+
+        private void OnTick(object s, EventArgs e)
+        {
+            if(wasStopped()){CancelRoll();return;}
+            if(clock.Elapsed.TotalSeconds>=EndAt){tick.Stop();Completed=true;Close();return;}
+            Invalidate();
+        }
+
+        internal void CancelRoll(){Completed=false;tick.Stop();if(!IsDisposed)Close();}
+
+        protected override void Dispose(bool d)
+        {
+            if(d)
+            {
+                tick.Stop();tick.Dispose();
+                fntHeader.Dispose();fntFace.Dispose();fntFaceSm.Dispose();fntNumber.Dispose();fntLabel.Dispose();
+                penEdge.Dispose();penHalo.Dispose();penSep.Dispose();penEdgeCyan.Dispose();penHaloCyan.Dispose();
+                bWhite.Dispose();bSecond.Dispose();bSecCyan.Dispose();bDark.Dispose();
+                for(int i=0;i<9;i++){bFaceRed[i].Dispose();bFaceCyan[i].Dispose();}
+            }
+            base.Dispose(d);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            Stopwatch sw=Stopwatch.StartNew();
+            Graphics g=e.Graphics;
+            g.Clear(CpBg);
+            g.SmoothingMode=cheap?SmoothingMode.HighSpeed:SmoothingMode.AntiAlias;
+            g.TextRenderingHint=TextRenderingHint.AntiAliasGridFit;
+            double time=Math.Min(EndAt,clock.Elapsed.TotalSeconds);
+            bool finished=time>=RevealAt;
+            if(!cheap){using(Pen scanPen=new Pen(Color.FromArgb(18,255,0,30),1))for(int y=0;y<Height;y+=3)g.DrawLine(scanPen,0,y,Width,y);}
+            DrawCornerBrackets(g);
+            string dieLabel=roll.Sides==0?"COIN FLIP":(roll.Count>1?roll.Count+"xD"+roll.Sides:"D"+roll.Sides);
+            g.DrawString("[ "+dieLabel+" "+(finished?"// LOCKED":"// ROLLING")+" ]",fntHeader,finished?bSecCyan:bSecond,14,10);
+            g.DrawLine(penSep,14,36,Width-14,36);
+            if(roll.Sides==0)DrawCoin(g,time,finished);
+            else
+            {
+                int n=dice.Length,cols=n>4?(n+1)/2:n;
+                double cell=(Width-38.0)/cols;float sz=(float)Math.Min(80,cell*0.39);
+                for(int i=0;i<n;i++)
+                {
+                    int row=i/cols,col=i%cols,rowCount=Math.Min(cols,n-row*cols);
+                    bool tens=roll.Sides==100&&i%2==0;
+                    double x=19+(cols-rowCount)*cell*0.5+cell*(col+0.5),y=125+row*165;
+                    DrawDie(g,dice[i],x,y,sz,time,i,finished,roll.Sides==100,tens);
+                }
+            }
+            if(finished)
+            {
+                string res=ResultLabel();SizeF ms=g.MeasureString(res,fntNumber);
+                float rx=(Width-ms.Width)/2f-14,ry=Height-56;
+                if(!cheap)for(int gw=8;gw>0;gw-=2)using(SolidBrush gb=new SolidBrush(Color.FromArgb(20,CpCyan)))g.FillRectangle(gb,rx-gw,ry-gw/2,ms.Width+28+gw*2,42+gw);
+                g.FillRectangle(bDark,rx,ry,ms.Width+28,42);
+                g.DrawRectangle(penEdgeCyan,rx,ry,ms.Width+28,42);
+                g.DrawString(res,fntNumber,bWhite,rx+14,ry+6);
+            }
+            else if((int)(time*4)%2==0)g.DrawString("\u25B6 TUMBLING...",fntLabel,bSecond,14,Height-30);
+            sw.Stop();if(sw.ElapsedMilliseconds>35)cheap=true;
+        }
+
+        private void DrawCornerBrackets(Graphics g)
+        {
+            const int L=14;
+            using(Pen p=new Pen(Color.FromArgb(140,CpRed),1.5f))
+            {
+                g.DrawLine(p,4,4+L,4,4);g.DrawLine(p,4,4,4+L,4);
+                g.DrawLine(p,Width-4-L,4,Width-4,4);g.DrawLine(p,Width-4,4,Width-4,4+L);
+                g.DrawLine(p,4,Height-4-L,4,Height-4);g.DrawLine(p,4,Height-4,4+L,Height-4);
+                g.DrawLine(p,Width-4-L,Height-4,Width-4,Height-4);g.DrawLine(p,Width-4,Height-4,Width-4,Height-4-L);
+            }
+        }
+
+        private string ResultLabel()
+        {
+            if(roll.Sides==0)return roll.Values[0]==0?"HEADS":"TAILS";
+            if(roll.Count==1)return roll.Values[0].ToString();
+            int s=0;for(int i=0;i<roll.Count;i++)s+=roll.Values[i];return "TOTAL "+s;
+        }
+
+        private void DrawDie(Graphics g,DieView view,double cx,double cy,float radius,double t,int slot,bool finished,bool percentile,bool tens)
+        {
+            Mesh mesh=view.Geometry;double at=Math.Min(SettleEnd,t);Q ori;
+            if(at<SettleStart)ori=TumbleRotation(at,slot);
+            else{double u=Math.Max(0,Math.Min(1,(at-SettleStart)/(SettleEnd-SettleStart)));ori=Q.Slerp(view.LandingStart,view.LandingEnd,1-Math.Pow(1-u,3));}
+            double left=Math.Max(0,1-at/SettleEnd);cy+=Math.Abs(Math.Sin(at*11))*11*left*left;
+            for(int i=0;i<mesh.Vertices.Length;i++)view.Rotated[i]=ori.Apply(mesh.Vertices[i]);
+            int vis=0;
+            for(int i=0;i<mesh.Faces.Length;i++)
+            {
+                int[]face=mesh.Faces[i];RenderFace r=view.Faces[i];
+                V3 a=view.Rotated[face[0]],b=view.Rotated[face[1]],c=view.Rotated[face[2]];
+                V3 norm=V3.Cross(b-a,c-a).Unit();r.Visible=norm.Z>0.012;if(!r.Visible)continue;
+                r.Brightness=Math.Max(0,Math.Min(.999,0.40+norm.Z*.41+norm.X*.12));
+                double zz=0,fx=0,fy=0;
+                for(int k=0;k<face.Length;k++){V3 pt=view.Rotated[face[k]];double sc=3.8/(3.8-pt.Z*.5);float px=(float)(cx+radius*pt.X*sc),py=(float)(cy-radius*pt.Y*sc);r.Points[k]=new PointF(px,py);fx+=px;fy+=py;zz+=pt.Z;}
+                r.X=(float)(fx/face.Length);r.Y=(float)(fy/face.Length);r.Depth=zz/face.Length;
+                float area=0;for(int k=0;k<face.Length;k++){PointF pp=r.Points[k],q=r.Points[(k+1)%face.Length];area+=pp.X*q.Y-q.X*pp.Y;}r.Area=Math.Abs(area)*0.5f;
+                view.Order[vis++]=i;
+            }
+            for(int i=1;i<vis;i++){int tmp=view.Order[i],j=i-1;while(j>=0&&view.Faces[view.Order[j]].Depth>view.Faces[tmp].Depth){view.Order[j+1]=view.Order[j];j--;}view.Order[j+1]=tmp;}
+            bool isRed=percentile&&tens;
+            SolidBrush[]palette=isRed?bFaceRed:bFaceCyan;Pen ePen=isRed?penEdge:penEdgeCyan,hPen=isRed?penHalo:penHaloCyan;
+            for(int i=0;i<vis;i++)
+            {
+                RenderFace r=view.Faces[view.Order[i]];int shade=(int)(r.Brightness*9);if(shade>8)shade=8;
+                g.FillPolygon(palette[shade],r.Points);if(!cheap)g.DrawPolygon(hPen,r.Points);g.DrawPolygon(ePen,r.Points);
+                bool chosen=finished&&r.Id==view.TargetFace;
+                if(r.Area>210||chosen)
+                {
+                    string txt=percentile?(tens?(r.Id*10).ToString("00"):r.Id.ToString()):(r.Id+1).ToString();
+                    Font fnt=chosen&&radius>58?fntNumber:(chosen||r.Area>=650?fntFace:fntFaceSm);
+                    SizeF sz=g.MeasureString(txt,fnt);
+                    int[]face=mesh.Faces[r.Id];V3 p1=view.Rotated[face[0]],p2=view.Rotated[face[1]];
+                    double s1=3.8/(3.8-p1.Z*.5),s2=3.8/(3.8-p2.Z*.5);
+                    float ang=(float)(Math.Atan2(-(p2.Y*s2-p1.Y*s1),p2.X*s2-p1.X*s1)*180/Math.PI);
+                    float nom=(float)Math.Sqrt(r.Area),scale=Math.Min(1f,nom*0.58f/Math.Max(1,Math.Max(sz.Width,sz.Height)));
+                    GraphicsState st=g.Save();g.TranslateTransform(r.X,r.Y);g.RotateTransform(ang);g.ScaleTransform(scale,scale);
+                    if(!cheap&&chosen){Color glowCol=isRed?CpRed:CpCyan;for(int gw=4;gw>0;gw--)using(SolidBrush gb=new SolidBrush(Color.FromArgb(35+gw*8,glowCol)))g.DrawString(txt,fnt,gb,-sz.Width/2+gw*.4f,-sz.Height/2+gw*.4f);}
+                    g.DrawString(txt,fnt,chosen?bWhite:(isRed?bSecond:bSecCyan),-sz.Width/2,-sz.Height/2);
+                    g.Restore(st);
+                }
+            }
+        }
+
+        private static double CoinAngle(double t,bool heads){double u=Math.Max(0,Math.Min(1,t/SettleEnd)),travel=1-Math.Pow(1-u,3);return(heads?24.0:25.0)*Math.PI*travel;}
+        private void DrawCoin(Graphics g,double t,bool finished)
+        {
+            float cx=Width/2f,cy=124,radius=79;double el=Math.Min(SettleEnd,t),angle=CoinAngle(el,roll.Values[0]==0);
+            float half=(float)(Math.Abs(Math.Cos(angle))*radius);if(half<4)half=4;
+            double left=Math.Max(0,1-el/SettleEnd);float bounce=(float)(Math.Abs(Math.Sin(el*11))*17*left*left);
+            bool heads=Math.Cos(angle)>=0;
+            SolidBrush[]palette=heads?bFaceCyan:bFaceRed;Pen ep=heads?penEdgeCyan:penEdge,hp=heads?penHaloCyan:penHalo;
+            RectangleF rect=new RectangleF(cx-half,cy-radius+bounce,half*2,radius*2);
+            g.FillEllipse(palette[8],rect);if(!cheap)g.DrawEllipse(hp,rect);g.DrawEllipse(ep,rect);
+            if(half>36||finished)
+            {
+                string lbl=heads?"H":"T";SizeF sz=g.MeasureString(lbl,fntNumber);
+                if(!cheap)for(int gw=4;gw>0;gw--)using(SolidBrush gb=new SolidBrush(Color.FromArgb(40+gw*10,heads?CpCyan:CpRed)))g.DrawString(lbl,fntNumber,gb,cx-sz.Width/2+gw*.5f,cy+bounce-sz.Height/2+gw*.5f);
+                g.DrawString(lbl,fntNumber,bWhite,cx-sz.Width/2,cy+bounce-sz.Height/2);
+            }
+        }
+    }
+}
