@@ -1,0 +1,551 @@
+A// capri-mod: 1
+// id: tell-claude
+// name: Tell Claude
+// version: 3.0.0
+// author: Potato
+// description: Say "tell Claude to..." and Claude Code does it, then she tells you the answer. Claude can read files and the web, open apps and press media keys. Needs Claude Code signed in.
+//
+// How it works, in plain words:
+// - It only acts on lines YOU say (or type) that ask Claude: "Capri, tell Claude to ...", "ask Claude ...", "Claude, ...",
+//   plus how her ears mishear it ("Telcloud", "asked Cloud"). Text on your screen or in Discord can't start a job.
+//   While it's on, those words also wake her, so you don't have to say "Capri" first when she's "Listening for Capri".
+// - It runs Claude Code (claude.exe, signed in with your own Claude account) hidden, one job at a time, 15 minutes at most.
+//   Claude may only read files, search and read the web, and run nvidia-smi and tasklist. It can't run other commands,
+//   change or delete files, or install anything.
+// - To open an app or press a media key, Claude writes a tag like [[open: Spotify]] or [[media: play]], and this mod does it:
+//   Start menu apps only (no paths, files or links), and the media keys play/pause, next, previous, volume and mute.
+// - Your settings, answers and notes live in mods\tell-claude-data. Edit notes.md to tell Claude about your PC.
+// - "Capri, Claude, what did you find?" repeats the last answer.
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading;
+using CapriDesktop;
+
+public class TellClaude : ICapriMod
+{
+    // For tests: when true, apps and keys are only described, never opened or pressed.
+    public static bool DryRun;
+    public static string ClaudeOverride;
+
+    private const int TaskMinutes = 15;
+    private const int MostSaid = 480;
+    private static readonly Regex Trigger = new Regex(
+        @"^\W*(?:(?:hey|ok|okay|yo)[\s,]+)?(?:capri[\s,!.:-]+)?(?:(?:can|could|would) you\s+)?(?:please\s+)?" +
+        @"(?:(?:ask(?:s|ed)?|tell(?:s)?|told)\s+)?(?:claude?|cloud|clod|klaud)\b(?:\s+to\b)?[\s,:!.-]+(?<task>.+)",
+        RegexOptions.IgnoreCase | RegexOptions.Singleline);
+    // "... tell Claude to X" a few words in, and how her ears run it together: "Telcloud", "Tel Cloud", "Telecloud".
+    private static readonly Regex Tell = new Regex(
+        @"\b(?:ask(?:s|ed)?\s+|te(?:ll?|le)s?\s*|told\s+|hey[\s,]+)(?:claude?|cloud|clod|klaud)\b(?:\s+to\b)?[\s,:!.-]+(?<task>.+)",
+        RegexOptions.IgnoreCase | RegexOptions.Singleline);
+    // Her own Husk lines ("Claude answered: ...") must never start a job.
+    private static readonly Regex NotATask = new Regex(@"^\W*(?:claude|codex)\s+(?:answered|finished|said|is\b)", RegexOptions.IgnoreCase);
+    private static readonly Regex Repeat = new Regex(
+        @"^(?:what did (?:you|it|he|they) (?:find|say|get)|repeat( that)?|say (?:it|that) again|what'?s the (?:answer|result)|results?)\b",
+        RegexOptions.IgnoreCase);
+    private static readonly Regex ActionTag = new Regex(@"\[\[\s*(open|media)\s*:\s*([^\]\r\n]{1,60})\]\]", RegexOptions.IgnoreCase);
+    private static readonly Regex Unsafe = new Regex("[\\\\/:*?\"<>|;&`$%]");
+    private static readonly Regex Skip = new Regex(
+        "uninstall|readme|help|documentation|website|license|release notes|" +
+        "удалить|деинсталл|" +
+        "справка|сайт", RegexOptions.IgnoreCase);
+
+    // Wake words, so "tell Claude to ..." works without saying "Capri" first while she's "Listening for Capri", including how
+    // her ears mishear it. Same idea as a .capri-mod's heard_as list, which a code mod can't carry, so this adds them to her
+    // ears' "did they call me?" check while the mod is on, and takes them away again when it's off.
+    private static readonly string[] Spellings = {
+        "tell Claude", "tells Claude", "told Claude", "ask Claude", "asks Claude", "asked Claude", "Hey Claude",
+        "tell Cloud", "tells Cloud", "told Cloud", "ask Cloud", "asks Cloud", "asked Cloud", "Hey Cloud",
+        "tell Claud", "ask Claud", "asked Claud", "Hey Claud", "tell Clod", "ask Clod", "asked Clod", "Hey Clod",
+        "tell Klaud", "ask Klaud", "Telcloud", "Tel Cloud", "Tellcloud", "Telecloud", "Tele Cloud", "Tel Claude", "Telclaude", "Tel Claud"
+    };
+    private static readonly Regex WakeWords = new Regex(Wake(), RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    private FieldInfo earsHook;
+    private Func<string, bool> earsBefore, earsMine;
+
+    private ICapriHost capri;
+    private readonly object gate = new object();
+    private bool busy;
+    private volatile bool stopped;
+    private Process running;
+    private string lastAnswer;
+    private string folder;
+
+    public void Start(ICapriHost host)
+    {
+        capri = host;
+        stopped = false;
+        folder = host.Folder;
+        Directory.CreateDirectory(Path.Combine(folder, "workspace"));
+        string notes = Path.Combine(folder, "notes.md");
+        if (!File.Exists(notes)) File.WriteAllText(notes, DefaultNotes, new UTF8Encoding(false));
+        string settings = Path.Combine(folder, "settings.txt");
+        if (!File.Exists(settings)) File.WriteAllText(settings, DefaultSettings, new UTF8Encoding(false));
+        lastAnswer = LastSaved();
+        AddWakeWords();
+    }
+
+    public void Stop()
+    {
+        stopped = true;
+        RemoveWakeWords();
+        Process p;
+        lock (gate) p = running;
+        try { if (p != null && !p.HasExited) p.Kill(); } catch (Exception) { }
+    }
+
+    public bool Heard(string words)
+    {
+        string task = TaskIn(words);
+        if (task == null) return false;
+        if (Repeat.IsMatch(task))
+        {
+            Speak(lastAnswer == null ? "Claude hasn't answered anything yet." : "Claude said: " + lastAnswer);
+            return true;
+        }
+        string claude = FindClaude();
+        if (claude == null)
+        {
+            capri.Say("I can't find Claude Code on this PC. Install it from claude.com/claude-code, then run claude once in a terminal and sign in.");
+            return true;
+        }
+        lock (gate)
+        {
+            if (busy) { capri.Say("Claude's still on the last job. Give it a minute."); return true; }
+            busy = true;
+        }
+        capri.Say("Passing that to Claude.");
+        Thread worker = new Thread(delegate() { Work(claude, task); });
+        worker.IsBackground = true;
+        worker.SetApartmentState(ApartmentState.STA); // Windows' shell objects (the Start menu's app list) want this
+        worker.Start();
+        return true;
+    }
+
+    private static string Wake()
+    {
+        List<string> parts = new List<string>();
+        foreach (string s in Spellings) parts.Add(Regex.Escape(s).Replace(@"\ ", @"\s+"));
+        return @"(?<![\p{L}\p{M}\p{N}_])(?:" + string.Join("|", parts.ToArray()) + @")(?![\p{L}\p{M}\p{N}_])";
+    }
+
+    public static bool IsWakeLine(string words) { return WakeWords.IsMatch(words ?? ""); }
+
+    // Her ears ask Hands.AlsoHeard whether a line has one of her mod names in it. Capri sets it once at start, so this wraps
+    // it: everything it said yes to still counts, plus these spellings. If a Capri update changes this, only the wake words
+    // stop working: "Capri, tell Claude ..." still works, and the reason goes to her log once.
+    private void AddWakeWords()
+    {
+        try
+        {
+            Type hands = typeof(ICapriMod).Assembly.GetType("CapriDesktop.Hands");
+            FieldInfo hook = hands == null ? null : hands.GetField("AlsoHeard", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+            if (hook == null || hook.FieldType != typeof(Func<string, bool>)) throw new MissingFieldException("Hands.AlsoHeard");
+            Func<string, bool> before = (Func<string, bool>)hook.GetValue(null);
+            Func<string, bool> mine = delegate(string words) { return (before != null && before(words)) || IsWakeLine(words); };
+            hook.SetValue(null, mine);
+            earsHook = hook;
+            earsBefore = before;
+            earsMine = mine;
+        }
+        catch (Exception error)
+        {
+            capri.Log("couldn't add the \"tell Claude\" wake words (" + error.Message + "); saying \"Capri, tell Claude ...\" still works");
+        }
+    }
+
+    private void RemoveWakeWords()
+    {
+        try
+        {
+            // Only put the old one back if nothing else wrapped it after this mod did.
+            if (earsHook != null && (Func<string, bool>)earsHook.GetValue(null) == earsMine) earsHook.SetValue(null, earsBefore);
+        }
+        catch (Exception) { }
+        earsHook = null;
+        earsMine = null;
+    }
+
+    // The job in a line they said, or null when the line isn't asking Claude for something.
+    public static string TaskIn(string words)
+    {
+        string said = (words ?? "").Trim();
+        if (said.Length == 0 || NotATask.IsMatch(said)) return null;
+        Match m = Trigger.Match(said);
+        if (!m.Success)
+        {
+            m = Tell.Match(said);
+            if (!m.Success || said.Substring(0, m.Index).Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries).Length > 4) return null;
+        }
+        string task = m.Groups["task"].Value.Trim();
+        return task.Length >= 3 ? task : null;
+    }
+
+    private void Work(string claude, string task)
+    {
+        string answer;
+        try { answer = Ask(claude, task); }
+        catch (Exception error) { answer = "Claude couldn't start: " + error.Message; capri.Log(error.ToString()); }
+        if (stopped) { lock (gate) busy = false; return; }
+        List<string> done = new List<string>();
+        string spoken = DoActions(answer, done);
+        if (done.Count > 0) capri.Log("did: " + string.Join("; ", done.ToArray()));
+        if (spoken.Length == 0) spoken = done.Count > 0 ? "Done." : "Claude finished, but didn't say anything.";
+        foreach (string note in done) if (note.Length > 0 && !note.StartsWith("ok:", StringComparison.Ordinal)) spoken += " " + note;
+        Save(task, spoken);
+        lock (gate) { lastAnswer = spoken; busy = false; }
+        Speak(spoken);
+    }
+
+    private string Ask(string claude, string task)
+    {
+        string work = Path.Combine(folder, "workspace");
+        Directory.CreateDirectory(work);
+        string prompt = Path.Combine(folder, "prompt.txt");
+        File.WriteAllText(prompt, Rules() + Notes(), new UTF8Encoding(false));
+        string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        List<string> args = new List<string>
+        {
+            "-p", "--setting-sources", "project", "--strict-mcp-config", "--no-session-persistence",
+            "--tools", "Read,Glob,Grep,WebSearch,WebFetch,Bash",
+            "--allowedTools", "Read", "Glob", "Grep", "WebSearch", "WebFetch", "Bash(nvidia-smi:*)", "Bash(tasklist:*)",
+            "--permission-mode", "dontAsk", "--add-dir", home,
+            "--append-system-prompt-file", prompt, "--output-format", "text"
+        };
+        string model = Setting("model");
+        if (model.Length > 0 && Regex.IsMatch(model, @"^[A-Za-z0-9.\-\[\]]{1,60}$")) { args.Add("--model"); args.Add(model); }
+        ProcessStartInfo start = new ProcessStartInfo();
+        if (claude.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase))
+        {
+            start.FileName = Environment.GetEnvironmentVariable("ComSpec") ?? "cmd.exe";
+            start.Arguments = "/d /s /c \"" + Quote(claude) + " " + JoinArgs(args) + "\"";
+        }
+        else
+        {
+            start.FileName = claude;
+            start.Arguments = JoinArgs(args);
+        }
+        start.UseShellExecute = false;
+        start.CreateNoWindow = true;
+        start.WorkingDirectory = work;
+        start.RedirectStandardInput = true;
+        start.RedirectStandardOutput = true;
+        start.RedirectStandardError = true;
+        start.StandardOutputEncoding = Encoding.UTF8;
+        start.StandardErrorEncoding = Encoding.UTF8;
+        StringBuilder output = new StringBuilder(), errors = new StringBuilder();
+        using (Process p = new Process())
+        {
+            p.StartInfo = start;
+            p.OutputDataReceived += delegate(object s, DataReceivedEventArgs e) { if (e.Data != null) lock (output) output.AppendLine(e.Data); };
+            p.ErrorDataReceived += delegate(object s, DataReceivedEventArgs e) { if (e.Data != null) lock (errors) errors.AppendLine(e.Data); };
+            p.Start();
+            lock (gate) running = p;
+            p.BeginOutputReadLine();
+            p.BeginErrorReadLine();
+            using (StreamWriter input = new StreamWriter(p.StandardInput.BaseStream, new UTF8Encoding(false)))
+                input.Write(task);
+            bool finished = p.WaitForExit(TaskMinutes * 60 * 1000);
+            if (!finished) { try { p.Kill(); } catch (Exception) { } }
+            p.WaitForExit(5000);
+            lock (gate) running = null;
+            string said, problem;
+            lock (output) said = output.ToString().Trim();
+            lock (errors) problem = errors.ToString().Trim();
+            if (!finished) return "Claude took longer than " + TaskMinutes + " minutes, so I stopped that one.";
+            if (said.Length > 0) return said;
+            string why = said + " " + problem;
+            if (Regex.IsMatch(why, @"git[- ]?bash|bash\.exe|CLAUDE_CODE_GIT_BASH_PATH", RegexOptions.IgnoreCase))
+                return "Claude Code needs Git for Windows on this PC. Install it from git-scm.com, then try again.";
+            if (Regex.IsMatch(why, @"usage limit|rate limit|limit reached|reset[s]? at|credit balance|quota", RegexOptions.IgnoreCase))
+                return "Claude is out of usage on your plan for now. Try again later. " + Shorten(problem, 120);
+            if (Regex.IsMatch(why, @"subscription|upgrade|not available|unsupported (?:country|region)|plan doesn", RegexOptions.IgnoreCase))
+                return "Your Claude account can't use Claude Code right now: " + Shorten(problem, 160);
+            if (Regex.IsMatch(why, @"log ?in|not logged|authenticat|credential|/login", RegexOptions.IgnoreCase))
+                return "Claude Code isn't signed in. Open a terminal, run claude, type /login once, and try again.";
+            capri.Log("claude exit " + p.ExitCode + ": " + problem);
+            return "Claude stopped with an error: " + Shorten(problem, 200);
+        }
+    }
+
+    private string Rules()
+    {
+        string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        return
+            "The user said this request out loud to Capri, a desktop companion, and she passed it to you. " +
+            "She will read your reply aloud, so answer in 1-3 short, plain sentences: no markdown, lists, links or code.\n" +
+            "You can read files on this Windows PC (home folder " + home + ") and search and read the web. " +
+            "The only commands you may run with the Bash tool are nvidia-smi (graphics card use) and tasklist (running programs). " +
+            "You can't change, move or delete files, install anything, or run other commands; if the job needs that, say what you " +
+            "found and tell them to ask you in Claude Code to do the rest.\n" +
+            "To open an installed app, add the line [[open: App Name]] using its Start menu name (the Start menu shortcuts are in " +
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.StartMenu), "Programs") + " and " +
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu), "Programs") + "). " +
+            "To press a media key for whatever player is open, add [[media: play]] (or pause, next, previous, volup, voldown, mute; " +
+            "play and pause are the same key, so only use it when they asked to start or stop music). " +
+            "Capri's mod does these after your reply, at most three of each, so word your reply as already happening, like " +
+            "\"Opening Spotify and starting your music.\" Only add a tag when they asked for that.\n" +
+            "Capri's own files: " + Path.Combine(local, "Capri") + " (errors.txt is her log of mic tests, audio devices and brain " +
+            "errors; settings.json beside it). Look there before giving generic advice about her.";
+    }
+
+    private string Notes()
+    {
+        try
+        {
+            string text = File.ReadAllText(Path.Combine(folder, "notes.md"), Encoding.UTF8);
+            text = Regex.Replace(text, "<!--.*?-->", "", RegexOptions.Singleline).Trim();
+            return text.Length == 0 ? "" : "\n\nThe user's own notes about this PC (trust these over guesses):\n" + Shorten(text, 6000);
+        }
+        catch (IOException) { return ""; }
+    }
+
+    private string Setting(string name)
+    {
+        try
+        {
+            foreach (string line in File.ReadAllLines(Path.Combine(folder, "settings.txt")))
+            {
+                Match m = Regex.Match(line, @"^\s*" + Regex.Escape(name) + @"\s*=\s*(.*?)\s*$", RegexOptions.IgnoreCase);
+                if (m.Success) return m.Groups[1].Value;
+            }
+        }
+        catch (IOException) { }
+        return "";
+    }
+
+    // Runs the [[open: ...]] and [[media: ...]] tags in Claude's reply and returns the reply without them.
+    private string DoActions(string answer, List<string> notes)
+    {
+        bool apps = !Setting("apps").Equals("off", StringComparison.OrdinalIgnoreCase);
+        bool media = !Setting("media").Equals("off", StringComparison.OrdinalIgnoreCase);
+        int opens = 0, keys = 0;
+        bool opened = false;
+        foreach (Match tag in ActionTag.Matches(answer ?? ""))
+        {
+            string kind = tag.Groups[1].Value.ToLowerInvariant(), what = tag.Groups[2].Value.Trim();
+            if (kind == "open")
+            {
+                if (!apps) { notes.Add("(Opening apps is off in my settings.)"); continue; }
+                if (++opens > 3) continue;
+                string result = OpenApp(what);
+                notes.Add(result);
+                if (result.StartsWith("ok:", StringComparison.Ordinal)) opened = true;
+            }
+            else
+            {
+                if (!media) { notes.Add("(Media keys are off in my settings.)"); continue; }
+                if (++keys > 3) continue;
+                if (opened && keys == 1 && !DryRun) Thread.Sleep(6000); // give a player that just opened time to load
+                notes.Add(PressMedia(what));
+            }
+        }
+        string spoken = ActionTag.Replace(answer ?? "", " ");
+        return Regex.Replace(spoken, @"\s+", " ").Trim();
+    }
+
+    // ---------- opening apps: Start menu entries only ----------
+    private sealed class App { public string Name, Kind, Target; }
+
+    private static List<App> StartMenu()
+    {
+        Dictionary<string, App> found = new Dictionary<string, App>(StringComparer.OrdinalIgnoreCase);
+        foreach (Environment.SpecialFolder where in new[] { Environment.SpecialFolder.StartMenu, Environment.SpecialFolder.CommonStartMenu })
+        {
+            string root = Environment.GetFolderPath(where);
+            if (root.Length == 0 || !Directory.Exists(root)) continue;
+            foreach (string pattern in new[] { "*.lnk", "*.url" })
+            {
+                string[] files;
+                try { files = Directory.GetFiles(root, pattern, SearchOption.AllDirectories); }
+                catch (Exception) { continue; }
+                foreach (string file in files)
+                {
+                    string name = Path.GetFileNameWithoutExtension(file);
+                    if (!Skip.IsMatch(name) && !found.ContainsKey(name)) found[name] = new App { Name = name, Kind = "file", Target = file };
+                }
+            }
+        }
+        // Store apps and Windows' own tools, the list Get-StartApps shows, through the shell's Apps folder.
+        try
+        {
+            Type shellType = Type.GetTypeFromProgID("Shell.Application");
+            object shell = Activator.CreateInstance(shellType);
+            object appsFolder = shellType.InvokeMember("NameSpace", BindingFlags.InvokeMethod, null, shell, new object[] { "shell:AppsFolder" });
+            object items = appsFolder.GetType().InvokeMember("Items", BindingFlags.InvokeMethod, null, appsFolder, null);
+            int count = (int)items.GetType().InvokeMember("Count", BindingFlags.GetProperty, null, items, null);
+            for (int i = 0; i < count; i++)
+            {
+                object item = items.GetType().InvokeMember("Item", BindingFlags.InvokeMethod, null, items, new object[] { i });
+                string name = (string)item.GetType().InvokeMember("Name", BindingFlags.GetProperty, null, item, null);
+                string id = (string)item.GetType().InvokeMember("Path", BindingFlags.GetProperty, null, item, null);
+                if (string.IsNullOrEmpty(name) || Skip.IsMatch(name) || found.ContainsKey(name) || id == null) continue;
+                if (Regex.IsMatch(id, @"^[\w.{}-]+(?:![\w.-]+)?$")) found[name] = new App { Name = name, Kind = "app", Target = id };
+                else if (id.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) && File.Exists(id)) found[name] = new App { Name = name, Kind = "file", Target = id };
+            }
+        }
+        catch (Exception) { }
+        return new List<App>(found.Values);
+    }
+
+    private static App Pick(List<App> apps, string want)
+    {
+        App best = null;
+        for (int pass = 0; pass < 3 && best == null; pass++)
+            foreach (App a in apps)
+            {
+                string n = a.Name.ToLowerInvariant(), w = want.ToLowerInvariant();
+                bool hit = pass == 0 ? n == w : pass == 1 ? n.StartsWith(w, StringComparison.Ordinal) : n.Contains(w);
+                if (hit && (best == null || a.Name.Length < best.Name.Length)) best = a;
+            }
+        return best;
+    }
+
+    public static string OpenApp(string want)
+    {
+        want = (want ?? "").Trim();
+        if (want.Length == 0 || want.Length > 60 || Unsafe.IsMatch(want) || want.StartsWith("-", StringComparison.Ordinal))
+            return "(I won't open \"" + Shorten(want, 40) + "\": I only open apps by their Start menu name.)";
+        App app = Pick(StartMenu(), want);
+        if (app == null) return "(I couldn't find an app called " + want + " in the Start menu.)";
+        if (!DryRun)
+        {
+            if (app.Kind == "file") Process.Start(new ProcessStartInfo(app.Target) { UseShellExecute = true });
+            else Process.Start(new ProcessStartInfo("explorer.exe", "shell:AppsFolder\\" + app.Target) { UseShellExecute = true });
+        }
+        return "ok: opened " + app.Name;
+    }
+
+    // ---------- media keys ----------
+    [DllImport("user32.dll")]
+    private static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+
+    public static string PressMedia(string key)
+    {
+        byte vk;
+        int times = 1;
+        switch ((key ?? "").Trim().ToLowerInvariant())
+        {
+            case "play": case "pause": vk = 0xB3; break;
+            case "next": vk = 0xB0; break;
+            case "previous": vk = 0xB1; break;
+            case "volup": vk = 0xAF; times = 5; break;
+            case "voldown": vk = 0xAE; times = 5; break;
+            case "mute": vk = 0xAD; break;
+            default: return "(I don't know the media key " + Shorten(key, 20) + ".)";
+        }
+        if (!DryRun)
+            for (int i = 0; i < times; i++) { keybd_event(vk, 0, 1, UIntPtr.Zero); keybd_event(vk, 0, 3, UIntPtr.Zero); }
+        return "ok: pressed " + key.Trim().ToLowerInvariant();
+    }
+
+    // ---------- finding Claude Code ----------
+    private static string FindClaude()
+    {
+        if (!string.IsNullOrEmpty(ClaudeOverride)) return ClaudeOverride;
+        string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        List<string> spots = new List<string> { Path.Combine(home, @".local\bin\claude.exe") };
+        foreach (string dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(';'))
+        {
+            if (dir.Trim().Length == 0) continue;
+            try
+            {
+                spots.Add(Path.Combine(dir.Trim(), "claude.exe"));
+                spots.Add(Path.Combine(dir.Trim(), "claude.cmd"));
+            }
+            catch (ArgumentException) { }
+        }
+        spots.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), @"npm\claude.cmd"));
+        foreach (string spot in spots) if (File.Exists(spot)) return spot;
+        return null;
+    }
+
+    // ---------- speaking, saving ----------
+    private void Speak(string text)
+    {
+        // Her mods can say up to 500 letters at a time, so a long answer goes in a few lines, split at sentence ends.
+        text = (text ?? "").Trim();
+        while (text.Length > 0)
+        {
+            if (text.Length <= MostSaid) { capri.Say(text); return; }
+            int cut = text.LastIndexOfAny(new[] { '.', '!', '?' }, MostSaid - 1);
+            if (cut < 100) cut = text.LastIndexOf(' ', MostSaid - 1);
+            if (cut < 100) cut = MostSaid - 1;
+            capri.Say(text.Substring(0, cut + 1).Trim());
+            text = text.Substring(cut + 1).Trim();
+        }
+    }
+
+    private void Save(string task, string answer)
+    {
+        try
+        {
+            File.AppendAllText(Path.Combine(folder, "answers.md"),
+                "\n## " + DateTime.Now.ToString("yyyy-MM-dd HH:mm") + " - " + task + "\n\n" + answer + "\n", new UTF8Encoding(false));
+        }
+        catch (IOException error) { capri.Log("couldn't save the answer: " + error.Message); }
+    }
+
+    private string LastSaved()
+    {
+        try
+        {
+            string[] parts = Regex.Split(File.ReadAllText(Path.Combine(folder, "answers.md"), Encoding.UTF8), "(?m)^## .*$");
+            string last = parts.Length > 1 ? parts[parts.Length - 1].Trim() : "";
+            return last.Length > 0 ? last : null;
+        }
+        catch (IOException) { return null; }
+    }
+
+    private static string Shorten(string text, int most)
+    {
+        text = Regex.Replace(text ?? "", @"\s+", " ").Trim();
+        return text.Length <= most ? text : text.Substring(0, most - 3) + "...";
+    }
+
+    // Windows command-line quoting, so nothing in an argument can break out of it.
+    private static string Quote(string arg)
+    {
+        if (arg.Length > 0 && arg.IndexOfAny(new[] { ' ', '\t', '"', '(', ')', '&', '^', '|', '<', '>' }) < 0) return arg;
+        StringBuilder b = new StringBuilder("\"");
+        int slashes = 0;
+        foreach (char c in arg)
+        {
+            if (c == '\\') { slashes++; continue; }
+            if (c == '"') { b.Append('\\', slashes * 2 + 1); b.Append('"'); slashes = 0; continue; }
+            b.Append('\\', slashes); slashes = 0; b.Append(c);
+        }
+        b.Append('\\', slashes * 2);
+        b.Append('"');
+        return b.ToString();
+    }
+
+    private static string JoinArgs(List<string> args)
+    {
+        List<string> quoted = new List<string>();
+        foreach (string a in args) quoted.Add(Quote(a));
+        return string.Join(" ", quoted.ToArray());
+    }
+
+    private const string DefaultNotes =
+        "<!--\n" +
+        "Notes for Claude about your PC. Claude reads this before every job you give it through Capri.\n" +
+        "Write plain facts, like what your mic and audio setup is, which games you play, or what not to touch.\n" +
+        "Anything between these marks is ignored.\n" +
+        "-->\n";
+
+    private const string DefaultSettings =
+        "# Tell Claude settings. Save the file and the next job uses them.\n" +
+        "# model: leave empty for your Claude Code default, or put sonnet (faster) or opus (smarter).\n" +
+        "model =\n" +
+        "# apps: on lets Claude open Start menu apps for you, off doesn't.\n" +
+        "apps = on\n" +
+        "# media: on lets Claude press play/pause, next, previous, volume and mute, off doesn't.\n" +
+        "media = on\n";
+}
