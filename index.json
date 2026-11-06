@@ -58,6 +58,14 @@
       "about": "A Toxic colour set for her: acid-green hair, red accents, cyan eyes, green edges and a deep green body. Works with skins too."
     },
     {
+      "folder": "crt-terminal",
+      "file": "crt-terminal.capri-skin",
+      "name": "CRT Terminal",
+      "kind": "skin",
+      "author": "Vocyn",
+      "about": "Capri on an old green-phosphor monitor: scanlines and glow, code rain falling through her hair, a refresh band rolling down her and a block cursor blinking on her chest. Her glitches turn amber, like the tube losing sync."
+    },
+    {
       "folder": "custom-names",
       "file": "custom-names.capri-mod",
       "name": "Custom Names",
@@ -72,6 +80,22 @@
       "kind": "code",
       "author": "Issei",
       "about": "Fair dice, coin flips, random numbers and picks."
+    },
+    {
+      "folder": "frutiger-aero",
+      "file": "frutiger-aero.capri-skin",
+      "name": "Frutiger Aero",
+      "kind": "skin",
+      "author": "Vocyn",
+      "about": "Capri in the glossy mid-2000s look of Windows Vista and 7, all inside her own outline: water-glass blue hair full of rising bubbles, orange gel panels, gel-gloss shards, black-glass limbs and twinkling lens flares."
+    },
+    {
+      "folder": "galaxy",
+      "file": "galaxy.capri-skin",
+      "name": "Galaxy",
+      "kind": "skin",
+      "author": "Vocyn",
+      "about": "Deep space inside Capri: nebula hair full of twinkling and shooting stars, a starfield body with a galactic band, ringed planets and moons for panels, a cosmic edge glow and a star for an eye."
     },
     {
       "folder": "galaxy-hair-aurora",
@@ -98,6 +122,14 @@
       "about": "Her hair as a galaxy: deep space with violet and pink clouds."
     },
     {
+      "folder": "hair-down",
+      "file": "hair-down.capri-skin",
+      "name": "Hair Down",
+      "kind": "skin",
+      "author": "Vocyn",
+      "about": "Capri with her hair let down: one sleek hot-pink sheet with a neon glow, falling down her back to a hooked point, with a thin strand in front of her face."
+    },
+    {
       "folder": "halo",
       "file": "halo.capri-skin",
       "name": "Halo",
@@ -122,12 +154,52 @@
       "about": "A tiny code mod to learn from. Say \"mod check\" and she answers and counts how many times you've asked."
     },
     {
+      "folder": "kintsugi-porcelain",
+      "file": "kintsugi-porcelain.capri-skin",
+      "name": "Kintsugi Porcelain",
+      "kind": "skin",
+      "author": "Vocyn",
+      "about": "Capri as blue-and-white porcelain mended with gold: cobalt vines on white glaze, celadon panels, black lacquer limbs, a gold-leaf face and kintsugi seams with a glint running along them."
+    },
+    {
+      "folder": "kyoto-rain",
+      "file": "kyoto-rain.capri-skin",
+      "name": "Kyoto Rain",
+      "kind": "skin",
+      "author": "Vocyn",
+      "about": "Capri as a rainy night in an old Japanese street: storm-sky hair with rain slanting through it and drops falling off its tips, wave-print indigo, glowing paper-lantern panels, wet stone limbs full of reflected lights, and traffic-light eyes."
+    },
+    {
+      "folder": "lava-lamp",
+      "file": "lava-lamp.capri-skin",
+      "name": "Lava Lamp",
+      "kind": "skin",
+      "author": "Vocyn",
+      "about": "Capri as a 70s lava lamp: violet glass with glowing wax blobs rising, merging and pinching apart inside her, a warm glow from below, glowing wax panels and a brushed chrome base."
+    },
+    {
       "folder": "maid-suit",
       "file": "maid-suit.capri-skin",
       "name": "Maid Suit",
       "kind": "skin",
       "author": "Vocyn",
       "about": "A skin for Capri: a maid suit, for you weirdos."
+    },
+    {
+      "folder": "nicknames",
+      "file": "nicknames.capri-code",
+      "name": "Nicknames",
+      "kind": "code",
+      "author": "Vocyn",
+      "about": "Give Capri new names just by asking, out loud or in chat. She answers to them straight away and remembers them."
+    },
+    {
+      "folder": "rei-plugsuit",
+      "file": "rei-plugsuit.capri-skin",
+      "name": "Rei Plugsuit",
+      "kind": "skin",
+      "author": "Vocyn",
+      "about": "Capri in a white plugsuit inspired by Rei Ayanami: pale blue hair, two white interface clips on her head, a red chest core, shoulder pylons with orange tops, navy limbs, green plates, black leg bands and red eyes."
     },
     {
       "folder": "santa-hat-black",
@@ -162,6 +234,14 @@
       "about": "Puts your PC to sleep or shuts it down later, with a warning first."
     },
     {
+      "folder": "stained-glass",
+      "file": "stained-glass.capri-skin",
+      "name": "Stained Glass",
+      "kind": "skin",
+      "author": "Vocyn",
+      "about": "Capri as a cathedral window: sapphire and violet glass hair, a ruby and amber body and emerald panels, all leaded into panes, a painted glass face, and a sunbeam sweeping through her with glints on the lead."
+    },
+    {
       "folder": "startup-intros",
       "file": "startup-intros.capri-code",
       "name": "Startup Intros",
@@ -178,12 +258,28 @@
       "about": "Counts your gaming time and roasts you when it's time for a break."
     },
     {
+      "folder": "vaporwave",
+      "file": "vaporwave.capri-skin",
+      "name": "Vaporwave",
+      "kind": "skin",
+      "author": "Vocyn",
+      "about": "Capri in 2010s vaporwave: sunset hair with a striped retro sun and a swaying palm, a neon grid rolling down her legs, pastel marble, aqua tiles, VHS scanlines, tracking wobble and colour bleed."
+    },
+    {
       "folder": "voice-trivia",
       "file": "voice-trivia.capri-code",
       "name": "Voice Trivia",
       "kind": "code",
       "author": "Issei",
       "about": "Multiple-choice trivia out loud, with scores."
+    },
+    {
+      "folder": "y2k-chrome",
+      "file": "y2k-chrome.capri-skin",
+      "name": "Y2K Chrome",
+      "kind": "skin",
+      "author": "Vocyn",
+      "about": "Capri in turn-of-the-millennium chrome: liquid-mirror hair reflecting a sky, horizon and shiny floor that drift as she moves, rainbow holographic foil panels, glossy black limbs, an LCD face and twinkling lens stars."
     }
   ]
 }

@@ -1,0 +1,221 @@
+// capri-mod: 1
+// id: nicknames
+// name: Nicknames
+// version: 1.0.0
+// author: Avery
+// description: Give her new names out loud or in chat, like "Capri, answer to Kit". She answers to them straight away and remembers them.
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Reflection;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Windows.Forms;
+using CapriDesktop;
+
+// Say or type, after her name:
+//   "answer to Kit", "call yourself Kit", "your nickname is Kit", "add the name Kit", "I'll call you Kit"
+//   "stop answering to Kit", "forget the name Kit"
+//   "what are your names", "what can I call you"
+//   "forget all your names"
+// The names are kept in nicknames-list.capri-mod in the mods folder, a plain settings mod, so they show on the Mods
+// page and can be turned off there like any other. Turning this code mod off keeps them; removing that file clears them.
+public class Nicknames : ICapriMod
+{
+    private const string ListId = "nicknames-list";
+    private const int Most = 20;
+    private static readonly Regex GoodName = new Regex(@"^[\p{L}\p{M}\p{N}]+(?:[ '-][\p{L}\p{M}\p{N}]+)*$");
+    private const RegexOptions Options = RegexOptions.IgnoreCase | RegexOptions.CultureInvariant;
+    // A command has to start what was said, after a "hey", her name and a "please" or "can you", so ordinary talk
+    // like "what's the answer to life" never adds a name.
+    private const string Lead = @"^(?:(?:hey|hi|ok|okay|yo),?\s+)?(?:[\p{L}'-]+,?\s+)?(?:(?:please|can you|could you|will you|would you|from now on|and),?\s+)*";
+    private static readonly Regex[] Adds =
+    {
+        new Regex(Lead + @"(?:also |now )?(?:answer|respond) to (?<name>.+)$", Options),
+        new Regex(Lead + @"(?:also )?call yourself (?<name>.+)$", Options),
+        new Regex(Lead + @"your (?:new |other )?(?:nick ?name|name) is (?:also |now )?(?<name>.+)$", Options),
+        new Regex(Lead + @"add (?:the |a )?(?:nick ?name|name) (?<name>.+)$", Options),
+        new Regex(Lead + @"(?:i'?ll|i will|i'?m going to|i'?m gonna) (?:also )?call you (?<name>.+)$", Options),
+        new Regex(Lead + @"new (?:nick ?name|name)[,:]? (?<name>.+)$", Options),
+    };
+    private static readonly Regex[] Removes =
+    {
+        new Regex(Lead + @"(?:stop answering|don'?t answer|do not answer|stop responding|don'?t respond) to (?<name>.+)$", Options),
+        new Regex(Lead + @"(?:forget|remove|drop|delete) (?:the |your )?(?:nick ?name|name) (?<name>.+)$", Options),
+        new Regex(Lead + @"(?:don'?t|do not) call yourself (?<name>.+)$", Options),
+    };
+    private static readonly Regex Lists = new Regex(@"\b(?:what (?:are|is) (?:all )?your (?:other |nick ?)?names|list (?:all )?your (?:nick ?)?names|what (?:else )?(?:can|do) (?:i|we|people) call you|what are you called)\b", Options);
+    private static readonly Regex Clears = new Regex(@"\b(?:forget|clear|reset|remove|delete|drop) all (?:of )?your (?:nick ?|other )?names\b", Options);
+    // Words that follow "I'll call you" in ordinary talk, so "I'll call you later" doesn't become a name.
+    private static readonly HashSet<string> NotNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "later", "back", "tomorrow", "tonight", "soon", "now", "again", "sometime", "today", "in", "when", "if", "after",
+        "before", "on", "at", "the", "a", "an", "it", "that", "this", "me", "you", "him", "her", "them", "something",
+        "anything", "nothing", "whatever", "then", "next", "once", "every", "out", "up", "over", "please", "what", "by",
+        "yourself", "my", "your", "his", "our", "their", "its", "these", "those", "all", "some", "any", "no",
+        "each", "question", "questions", "message", "messages", "email", "emails", "texts", "calls",
+    };
+
+    private ICapriHost capri;
+    private string listFile;
+    private List<string> names = new List<string>();
+
+    public void Start(ICapriHost host)
+    {
+        capri = host;
+        listFile = Path.Combine(Directory.GetParent(host.Folder).FullName, ListId + ".capri-mod");
+        names = Read();
+    }
+
+    public void Stop() { }
+
+    public bool Heard(string words)
+    {
+        string said = (words ?? "").Trim();
+        if (said.Length == 0) return false;
+        if (Clears.IsMatch(said))
+        {
+            if (names.Count == 0) { capri.Say("I've only got the one name. Capri."); return true; }
+            names.Clear();
+            Save("Done. Just Capri again.");
+            return true;
+        }
+        if (Lists.IsMatch(said))
+        {
+            capri.Say(names.Count == 0 ? "Just Capri. Tell me to answer to something else if you want." : "Capri, or " + Join(names) + ".");
+            return true;
+        }
+        foreach (Regex remove in Removes)
+        {
+            Match match = remove.Match(said);
+            if (!match.Success) continue;
+            string name = Clean(match.Groups["name"].Value);
+            if (name == null) return false;
+            int at = names.FindIndex(delegate(string known) { return string.Equals(known, name, StringComparison.OrdinalIgnoreCase); });
+            if (at < 0) { capri.Say("I wasn't answering to " + name + " anyway."); return true; }
+            names.RemoveAt(at);
+            Save("Okay. I'll stop answering to " + name + ".");
+            return true;
+        }
+        foreach (Regex add in Adds)
+        {
+            Match match = add.Match(said);
+            if (!match.Success) continue;
+            string name = Clean(match.Groups["name"].Value);
+            if (name == null) return false;
+            if (string.Equals(name, "Capri", StringComparison.OrdinalIgnoreCase)) { capri.Say("That's already my name, choom."); return true; }
+            if (names.Exists(delegate(string known) { return string.Equals(known, name, StringComparison.OrdinalIgnoreCase); }))
+            {
+                capri.Say("I already answer to " + name + ".");
+                return true;
+            }
+            if (names.Count >= Most) { capri.Say("I've got " + Most + " names already. Make me forget one first."); return true; }
+            names.Add(name);
+            Save("Okay. I'll answer to " + name + " too.");
+            return true;
+        }
+        return false;
+    }
+
+    // The name said, tidied: up to three words of letters or numbers, without trailing words like "too" or "please".
+    private static string Clean(string raw)
+    {
+        string text = Regex.Replace(raw, "[\"\u201C\u201D.!?,;:]+", " ").Trim();
+        text = Regex.Replace(text, @"\s+(?:too|as well|also|instead|please|from now on|now|then|okay|ok|thanks|thank you)\s*$", "", Options).Trim();
+        text = Regex.Replace(text, @"^(?:the name |a name |name |just )", "", Options).Trim();
+        text = Regex.Replace(text, @"\s+", " ");
+        string[] parts = text.Split(' ');
+        if (text.Length < 2 || text.Length > 32 || parts.Length > 3 || !GoodName.IsMatch(text)) return null;
+        foreach (string part in parts) if (NotNames.Contains(part)) return null;
+        StringBuilder made = new StringBuilder();
+        foreach (string part in parts)
+        {
+            if (made.Length > 0) made.Append(' ');
+            made.Append(char.ToUpperInvariant(part[0])).Append(part.Substring(1));
+        }
+        return made.ToString();
+    }
+
+    private static string Join(List<string> list)
+    {
+        if (list.Count == 1) return list[0];
+        return string.Join(", ", list.GetRange(0, list.Count - 1).ToArray()) + " or " + list[list.Count - 1];
+    }
+
+    private List<string> Read()
+    {
+        List<string> found = new List<string>();
+        try
+        {
+            if (!File.Exists(listFile)) return found;
+            Match list = Regex.Match(File.ReadAllText(listFile), "\"wake_names\"\\s*:\\s*\\[(?<items>[^\\]]*)\\]");
+            foreach (Match item in Regex.Matches(list.Groups["items"].Value, "\"(?<name>[^\"]+)\""))
+            {
+                string name = item.Groups["name"].Value.Trim();
+                if (GoodName.IsMatch(name) && !found.Contains(name)) found.Add(name);
+            }
+        }
+        catch (IOException error) { capri.Log(error.Message); }
+        return found;
+    }
+
+    private void Save(string reply)
+    {
+        try
+        {
+            if (names.Count == 0)
+            {
+                if (File.Exists(listFile)) File.Delete(listFile);
+            }
+            else
+            {
+                StringBuilder list = new StringBuilder();
+                foreach (string name in names) list.Append(list.Length == 0 ? "" : ", ").Append('"').Append(name).Append('"');
+                string text = "{\n  \"format\": 1,\n  \"id\": \"" + ListId + "\",\n  \"name\": \"My Nicknames\",\n  \"version\": \"1.0.0\",\n"
+                    + "  \"author\": \"Nicknames\",\n  \"description\": \"The names you asked her to answer to. Made by the Nicknames mod.\",\n"
+                    + "  \"wake_names\": [" + list + "]\n}\n";
+                string writing = listFile + ".new";
+                File.WriteAllText(writing, text, new UTF8Encoding(false));
+                if (File.Exists(listFile)) File.Delete(listFile);
+                File.Move(writing, listFile);
+            }
+        }
+        catch (Exception error)
+        {
+            if (!(error is IOException || error is UnauthorizedAccessException)) throw;
+            capri.Log(error.ToString());
+            capri.Say("I couldn't save that: " + error.Message);
+            return;
+        }
+        capri.Say(Reload() ? reply : reply + " Restart me and it'll stick.");
+    }
+
+    // Asks Capri to read her mods again so the new names work straight away. Code mods have no call for that, so this
+    // reaches in by name; if a later Capri changes those names, the names still apply the next time she starts.
+    private bool Reload()
+    {
+        try
+        {
+            const BindingFlags inside = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+            FieldInfo owner = capri.GetType().GetField("capri", inside);
+            object companion = owner == null ? null : owner.GetValue(capri);
+            PropertyInfo list = companion == null ? null : companion.GetType().GetProperty("ModList", inside);
+            object mods = list == null ? null : list.GetValue(companion, null);
+            MethodInfo load = mods == null ? null : mods.GetType().GetMethod("Load", inside, null, Type.EmptyTypes, null);
+            Control window = companion as Control;
+            if (load == null || window == null || window.IsDisposed) return false;
+            window.BeginInvoke((MethodInvoker)delegate
+            {
+                try { load.Invoke(mods, null); }
+                catch (Exception error) { capri.Log("reload: " + error); }
+            });
+            return true;
+        }
+        catch (Exception error)
+        {
+            capri.Log("reload: " + error);
+            return false;
+        }
+    }
+}
