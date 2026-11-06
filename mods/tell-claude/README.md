@@ -26,8 +26,13 @@ Capri's Mainframe > Mods > Import mod > pick  tell-claude.capri-code.
 Capri warns that it runs code: that's normal for code mods. Read it first if you like (it's plain C#).
 
 WHAT CLAUDE CAN AND CAN'T DO HERE
-- Can: read files on your PC, search and read the web, check your graphics card (nvidia-smi) and running programs
+- Can: read files on your PC, search the web, check your graphics card (nvidia-smi) and running programs
   (tasklist), open apps by their Start menu name, and press media keys (play/pause, next, previous, volume, mute).
+- Follows Capri's SECURITY window (Mainframe > HABITS > Security):
+  - Claude reads web pages only on the Blackwall preset, since a page could tell Claude to send your files somewhere.
+    On the other presets it still searches the web.
+  - Opening apps and media keys follow "Open apps, games and sites" and "Music, media and volume". With one off, she
+    tells you what Claude wanted, so you can ask her and she checks with you first.
 - Can't: run any other commands, change, move or delete files, or install anything. It runs one job at a time,
   15 minutes at most, hidden in the background, without your personal Claude Code settings, hooks or MCP servers.
 - Only lines you say or type to Capri start a job. Text on your screen or in Discord can't.

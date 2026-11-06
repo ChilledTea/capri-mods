@@ -1,19 +1,22 @@
-A// capri-mod: 1
+// capri-mod: 1
 // id: tell-claude
 // name: Tell Claude
-// version: 3.0.0
+// version: 3.1.0
 // author: Potato
-// description: Say "tell Claude to..." and Claude Code does it, then she tells you the answer. Claude can read files and the web, open apps and press media keys. Needs Claude Code signed in.
+// description: Say "tell Claude to..." and Claude Code does it, then she tells you the answer. Claude can read files, search the web, open apps and press media keys, and in Blackwall it reads web pages too. Needs Claude Code signed in.
 //
 // How it works, in plain words:
 // - It only acts on lines YOU say (or type) that ask Claude: "Capri, tell Claude to ...", "ask Claude ...", "Claude, ...",
 //   plus how her ears mishear it ("Telcloud", "asked Cloud"). Text on your screen or in Discord can't start a job.
 //   While it's on, those words also wake her, so you don't have to say "Capri" first when she's "Listening for Capri".
 // - It runs Claude Code (claude.exe, signed in with your own Claude account) hidden, one job at a time, 15 minutes at most.
-//   Claude may only read files, search and read the web, and run nvidia-smi and tasklist. It can't run other commands,
-//   change or delete files, or install anything.
+//   Claude may only read files, search the web, and run nvidia-smi and tasklist. It can't run other commands,
+//   change or delete files, or install anything. It reads web pages only while Capri's SECURITY is on Blackwall, since a
+//   page could tell Claude to send your files somewhere.
 // - To open an app or press a media key, Claude writes a tag like [[open: Spotify]] or [[media: play]], and this mod does it:
 //   Start menu apps only (no paths, files or links), and the media keys play/pause, next, previous, volume and mute.
+//   These follow her SECURITY toggles "Open apps, games and sites" and "Music, media and volume": with one off, she says
+//   what Claude wanted, so you can ask her yourself and she checks with you first, like she does for her own tools.
 // - Your settings, answers and notes live in mods\tell-claude-data. Edit notes.md to tell Claude about your PC.
 // - "Capri, Claude, what did you find?" repeats the last answer.
 using System;
@@ -207,16 +210,16 @@ public class TellClaude : ICapriMod
         string work = Path.Combine(folder, "workspace");
         Directory.CreateDirectory(work);
         string prompt = Path.Combine(folder, "prompt.txt");
-        File.WriteAllText(prompt, Rules() + Notes(), new UTF8Encoding(false));
+        bool pages = WebPages();
+        File.WriteAllText(prompt, Rules(pages) + Notes(), new UTF8Encoding(false));
         string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         List<string> args = new List<string>
         {
             "-p", "--setting-sources", "project", "--strict-mcp-config", "--no-session-persistence",
-            "--tools", "Read,Glob,Grep,WebSearch,WebFetch,Bash",
-            "--allowedTools", "Read", "Glob", "Grep", "WebSearch", "WebFetch", "Bash(nvidia-smi:*)", "Bash(tasklist:*)",
-            "--permission-mode", "dontAsk", "--add-dir", home,
-            "--append-system-prompt-file", prompt, "--output-format", "text"
+            "--tools", Tools(pages), "--allowedTools"
         };
+        args.AddRange(Allowed(pages));
+        args.AddRange(new[] { "--permission-mode", "dontAsk", "--add-dir", home, "--append-system-prompt-file", prompt, "--output-format", "text" });
         string model = Setting("model");
         if (model.Length > 0 && Regex.IsMatch(model, @"^[A-Za-z0-9.\-\[\]]{1,60}$")) { args.Add("--model"); args.Add(model); }
         ProcessStartInfo start = new ProcessStartInfo();
@@ -273,14 +276,15 @@ public class TellClaude : ICapriMod
         }
     }
 
-    private string Rules()
+    private string Rules(bool pages)
     {
         string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         return
             "The user said this request out loud to Capri, a desktop companion, and she passed it to you. " +
             "She will read your reply aloud, so answer in 1-3 short, plain sentences: no markdown, lists, links or code.\n" +
-            "You can read files on this Windows PC (home folder " + home + ") and search and read the web. " +
+            "You can read files on this Windows PC (home folder " + home + ") and " + (pages ? "search and read the web. " :
+            "search the web. Opening web pages is off here (Capri's SECURITY allows it only in Blackwall), so work from search results. ") +
             "The only commands you may run with the Bash tool are nvidia-smi (graphics card use) and tasklist (running programs). " +
             "You can't change, move or delete files, install anything, or run other commands; if the job needs that, say what you " +
             "found and tell them to ask you in Claude Code to do the rest.\n" +
@@ -320,11 +324,54 @@ public class TellClaude : ICapriMod
         return "";
     }
 
+    // Her SECURITY window. Web pages need Blackwall, where "Pay, buy and book", "Things your request didn't mention" and "Type
+    // passwords and card numbers" are all on: a page could tell Claude to send your files somewhere, and only Blackwall lets
+    // her act without checking. Apps and media keys follow toggles 1 and 2, "Open apps, games and sites" and "Music, media and
+    // volume". Capri has no call for these, so this reads them by name; if an update moves them, web pages stay off and the
+    // mod's own settings decide the rest.
+    private const int OpenToggle = 0, MediaToggle = 1;
+
+    public static bool WebPages()
+    {
+        try
+        {
+            Type computer = typeof(ICapriMod).Assembly.GetType("CapriDesktop.Computer");
+            PropertyInfo bypass = computer == null ? null : computer.GetProperty("Bypass", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+            return bypass != null && bypass.PropertyType == typeof(bool) && (bool)bypass.GetValue(null, null);
+        }
+        catch (Exception) { return false; }
+    }
+
+    public static bool? Toggle(int number)
+    {
+        try
+        {
+            Type security = typeof(ICapriMod).Assembly.GetType("CapriDesktop.Security");
+            MethodInfo on = security == null ? null : security.GetMethod("On", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public, null, new[] { typeof(int) }, null);
+            if (on == null || on.ReturnType != typeof(bool)) return null;
+            return (bool)on.Invoke(null, new object[] { number });
+        }
+        catch (Exception) { return null; }
+    }
+
+    private static string Tools(bool pages) { return pages ? "Read,Glob,Grep,WebSearch,WebFetch,Bash" : "Read,Glob,Grep,WebSearch,Bash"; }
+
+    private static string[] Allowed(bool pages)
+    {
+        return pages
+            ? new[] { "Read", "Glob", "Grep", "WebSearch", "WebFetch", "Bash(nvidia-smi:*)", "Bash(tasklist:*)" }
+            : new[] { "Read", "Glob", "Grep", "WebSearch", "Bash(nvidia-smi:*)", "Bash(tasklist:*)" };
+    }
+
+    // For tests: the tools Claude gets right now, as Claude Code's --tools and --allowedTools.
+    public static string ToolsNow() { bool pages = WebPages(); return Tools(pages) + " | " + string.Join(" ", Allowed(pages)); }
+
     // Runs the [[open: ...]] and [[media: ...]] tags in Claude's reply and returns the reply without them.
     private string DoActions(string answer, List<string> notes)
     {
         bool apps = !Setting("apps").Equals("off", StringComparison.OrdinalIgnoreCase);
         bool media = !Setting("media").Equals("off", StringComparison.OrdinalIgnoreCase);
+        bool appsAllowed = Toggle(OpenToggle) != false, mediaAllowed = Toggle(MediaToggle) != false;
         int opens = 0, keys = 0;
         bool opened = false;
         foreach (Match tag in ActionTag.Matches(answer ?? ""))
@@ -333,6 +380,7 @@ public class TellClaude : ICapriMod
             if (kind == "open")
             {
                 if (!apps) { notes.Add("(Opening apps is off in my settings.)"); continue; }
+                if (!appsAllowed) { notes.Add("(Claude wanted to open " + Shorten(what, 40) + ". Open apps is off in my SECURITY settings, so ask me to open it and I'll check with you first.)"); continue; }
                 if (++opens > 3) continue;
                 string result = OpenApp(what);
                 notes.Add(result);
@@ -341,6 +389,7 @@ public class TellClaude : ICapriMod
             else
             {
                 if (!media) { notes.Add("(Media keys are off in my settings.)"); continue; }
+                if (!mediaAllowed) { notes.Add("(Claude wanted to press " + Shorten(what, 20) + ". Music, media and volume is off in my SECURITY settings, so ask me and I'll check with you first.)"); continue; }
                 if (++keys > 3) continue;
                 if (opened && keys == 1 && !DryRun) Thread.Sleep(6000); // give a player that just opened time to load
                 notes.Add(PressMedia(what));
