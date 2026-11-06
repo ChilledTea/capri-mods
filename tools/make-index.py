@@ -3,6 +3,14 @@ import json, os, re
 here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 root = os.path.join(here, 'mods')
 kinds = {'.capri-mod': 'settings', '.capri-code': 'code', '.capri-skin': 'skin', '.capri-skill': 'skill'}
+about_mod = {'format', 'id', 'name', 'version', 'author', 'description'}
+
+def kind(path, file):
+    # A settings mod that only sets her colours is a look, so Capri's directory lists it with the skins.
+    if file.endswith('.capri-mod') and set(json.load(open(os.path.join(path, file), encoding='utf-8'))) - about_mod == {'colors'}:
+        return 'skin'
+    return kinds[os.path.splitext(file)[1]]
+
 mods = []
 for folder in sorted(os.listdir(root)):
     path = os.path.join(root, folder)
@@ -16,7 +24,7 @@ for folder in sorted(os.listdir(root)):
     name = lines[0].lstrip('# ').strip()
     about = next(l.strip() for l in lines[1:] if l.strip() and not l.startswith('-') and not l.startswith('#'))
     author = re.search(r'^- Made by: (.+)$', readme, re.M).group(1).strip()
-    mods.append({'folder': folder, 'file': files[0], 'name': name, 'kind': kinds[os.path.splitext(files[0])[1]], 'author': author, 'about': about})
+    mods.append({'folder': folder, 'file': files[0], 'name': name, 'kind': kind(path, files[0]), 'author': author, 'about': about})
 out = {'format': 1, 'mods': mods}
 with open(os.path.join(here, 'index.json'), 'w', encoding='utf-8', newline='\n') as f:
     json.dump(out, f, ensure_ascii=False, indent=2)

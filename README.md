@@ -5,7 +5,7 @@ Mods for [Capri](https://github.com/lachydotmcg/capri-desktop), the desktop comp
 Every mod is checked for malware before it goes up here.
 
 ## Kinds of mod
-- **Settings mods** (`.capri-mod`): extra names, colours and other settings.
+- **Settings mods** (`.capri-mod`): extra names, colours and other settings. In Capri 0.8.5 or newer, a mod that only changes her colours shows under Skins.
 - **Code mods** (`.capri-code`): C# that Capri compiles and runs. Code mods can do anything on your PC, so Capri asks before running one.
 - **Skins** (`.capri-skin`): a zip of pictures that replace her art.
 - **Skills** (`.capri-skill`): know-how for a game, like what to build and when. Capri follows it whenever she plays that game. Skills need Capri 0.8.4 or newer.

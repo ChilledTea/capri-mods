@@ -29,7 +29,7 @@
       "folder": "colors-bubblegum",
       "file": "colors-bubblegum.capri-mod",
       "name": "Colors: Bubblegum",
-      "kind": "settings",
+      "kind": "skin",
       "author": "Vocyn",
       "about": "A Bubblegum colour set for her: pink hair, cyan accents, violet eyes, white edges and a plum body. Works with skins too."
     },
@@ -37,7 +37,7 @@
       "folder": "colors-cyber-cyan",
       "file": "colors-cyber-cyan.capri-mod",
       "name": "Colors: Cyber Cyan",
-      "kind": "settings",
+      "kind": "skin",
       "author": "Vocyn",
       "about": "A Cyber Cyan colour set for her: cyan hair, magenta accents, yellow eyes and violet edges. Her body keeps its usual colour. Works with skins too."
     },
@@ -45,7 +45,7 @@
       "folder": "colors-royal",
       "file": "colors-royal.capri-mod",
       "name": "Colors: Royal",
-      "kind": "settings",
+      "kind": "skin",
       "author": "Vocyn",
       "about": "A Royal colour set for her: purple hair, gold accents, sky-blue eyes, pink edges and a midnight body. Works with skins too."
     },
@@ -53,7 +53,7 @@
       "folder": "colors-toxic",
       "file": "colors-toxic.capri-mod",
       "name": "Colors: Toxic",
-      "kind": "settings",
+      "kind": "skin",
       "author": "Vocyn",
       "about": "A Toxic colour set for her: acid-green hair, red accents, cyan eyes, green edges and a deep green body. Works with skins too."
     },
