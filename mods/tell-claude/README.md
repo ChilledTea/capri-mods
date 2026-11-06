@@ -1,6 +1,11 @@
-TELL CLAUDE, a mod for Capri (by Potato)
-=========================================
-One file: tell-claude.capri-code. Say "tell Claude to ..." and Claude Code does the job, then Capri tells you the answer.
+# Tell Claude
+
+Say "tell Claude to ..." and Claude Code does the job, then Capri tells you the answer.
+
+- Kind: code
+- Made by: Potato
+
+One file: tell-claude.capri-code.
 
   "Tell Claude to check what's using my GPU"
   "Capri, ask Claude why my game is lagging"

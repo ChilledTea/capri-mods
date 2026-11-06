@@ -266,6 +266,14 @@
       "about": "Three start-up animations: Hijack, Shatter and Wake. She shuffles them each time she starts, or you pick one."
     },
     {
+      "folder": "tell-claude",
+      "file": "tell-claude.capri-code",
+      "name": "Tell Claude",
+      "kind": "code",
+      "author": "Potato",
+      "about": "Say \"tell Claude to ...\" and Claude Code does the job, then Capri tells you the answer."
+    },
+    {
       "folder": "touch-grass",
       "file": "touch-grass.capri-code",
       "name": "Touch Grass",
