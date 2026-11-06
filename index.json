@@ -162,6 +162,14 @@
       "about": "Capri as blue-and-white porcelain mended with gold: cobalt vines on white glaze, celadon panels, black lacquer limbs, a gold-leaf face and kintsugi seams with a glint running along them."
     },
     {
+      "folder": "kitchen-sponge",
+      "file": "kitchen-sponge.capri-skin",
+      "name": "Kitchen Sponge",
+      "kind": "skin",
+      "author": "Potato",
+      "about": "A skin for Capri: she's made of a kitchen sponge."
+    },
+    {
       "folder": "kyoto-rain",
       "file": "kyoto-rain.capri-skin",
       "name": "Kyoto Rain",
@@ -192,6 +200,14 @@
       "kind": "code",
       "author": "Vocyn",
       "about": "Give Capri new names just by asking, out loud or in chat. She answers to them straight away and remembers them."
+    },
+    {
+      "folder": "prism-overdrive",
+      "file": "prism-overdrive.capri-skin",
+      "name": "Prism Overdrive",
+      "kind": "skin",
+      "author": "Potato",
+      "about": "A skin for Capri with every effect, on every frame she has."
     },
     {
       "folder": "rei-plugsuit",
