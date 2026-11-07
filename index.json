@@ -162,6 +162,14 @@
       "about": "A tiny code mod to learn from. Say \"mod check\" and she answers and counts how many times you've asked."
     },
     {
+      "folder": "holocall",
+      "file": "holocall.capri-code",
+      "name": "Holocall",
+      "kind": "code",
+      "author": "Issei",
+      "about": "Say \"holo call\" and she stays on a little call screen in the corner, glitchy face, call-line voice and all, until you say \"hang up\"."
+    },
+    {
       "folder": "kintsugi-porcelain",
       "file": "kintsugi-porcelain.capri-skin",
       "name": "Kintsugi Porcelain",
