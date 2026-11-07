@@ -15,8 +15,9 @@ In Capri 0.8.3 or newer, open Capri Mainframe and press Mods in the CAPRI band. 
 
 ## Sharing a mod
 1. Fork this repo.
-2. Add a folder under `mods/` named after your mod. Put in the mod file, a short `README.md` that says what it does and who made it, and a picture called `preview.png`, around 16:9. That picture is what people see in Capri's mods window.
-3. Open a pull request.
+2. Add a folder under `mods/` named after your mod. Put in the mod file and a short `README.md` that says what it does. Your GitHub username goes on it as the author. Add a `- Made by:` line if you'd like a different name.
+3. Add a picture called `preview.png`, around 16:9, if you have one. That picture is what people see in Capri's mods window. Mods without one get a default picture.
+4. Open a pull request.
 
 ## Stay safe
 - Only install mods from here, or from people you trust.
