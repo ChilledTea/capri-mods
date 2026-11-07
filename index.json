@@ -194,6 +194,14 @@
       "about": "A skin for Capri: a maid suit, for you weirdos."
     },
     {
+      "folder": "maxtac",
+      "file": "maxtac.capri-skin",
+      "name": "MaxTac",
+      "kind": "skin",
+      "author": "Issei",
+      "about": "Capri in NCPD MaxTac gear, with a dark helmet and green lens clusters for eyes."
+    },
+    {
       "folder": "nicknames",
       "file": "nicknames.capri-code",
       "name": "Nicknames",
