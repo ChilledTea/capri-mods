@@ -10,6 +10,14 @@
       "about": "Roll animated 3D tabletop dice or flip a coin with Capri. Supports D4, D6, D8, D10, D12, D20 and D100 (two percentile dice), with numbered faces, cyberpunk visuals and playful commentary based on the result."
     },
     {
+      "folder": "aurora-borealis",
+      "file": "aurora-borealis.capri-skin",
+      "name": "Aurora Borealis",
+      "kind": "skin",
+      "author": "Vocyn",
+      "about": "Capri as an arctic night: green-to-violet northern lights rippling through night-sky hair, a glacier-ice body, aurora-green panels, polar-night limbs, frost on her edges and snow drifting past."
+    },
+    {
       "folder": "btd6-strategy",
       "file": "btd6-strategy.capri-skill",
       "name": "BTD6 strategy",
@@ -24,6 +32,14 @@
       "kind": "skin",
       "author": "Issei",
       "about": "Pointed black cat ears on her head."
+    },
+    {
+      "folder": "cherry-blossom",
+      "file": "cherry-blossom.capri-skin",
+      "name": "Cherry Blossom",
+      "kind": "skin",
+      "author": "Vocyn",
+      "about": "Capri in spring in old Japan: sakura-cloud hair thick with blossoms and shedding petals that flutter down past her, a plum kimono with a faint asanoha print, cherry-bark limbs, orchid-pink petal panels and a warm sunset glow."
     },
     {
       "folder": "colors-bubblegum",
@@ -74,12 +90,28 @@
       "about": "Capri answers to more names: Nova, Big Z and Capricorn. She still answers to Capri too."
     },
     {
+      "folder": "deep-sea",
+      "file": "deep-sea.capri-skin",
+      "name": "Deep Sea",
+      "kind": "skin",
+      "author": "Vocyn",
+      "about": "Capri in the abyss: ocean-blue hair and body under rippling caustic light, small glowing jellyfish drifting up through her hair, pulsing photophores along her seams, rising bubbles and glowing sea-glass panels."
+    },
+    {
       "folder": "dice-decider",
       "file": "dice-decider.capri-code",
       "name": "Dice & Decider",
       "kind": "code",
       "author": "Issei",
       "about": "Fair dice, coin flips, random numbers and picks."
+    },
+    {
+      "folder": "ember",
+      "file": "ember.capri-skin",
+      "name": "Ember",
+      "kind": "skin",
+      "author": "Vocyn",
+      "about": "Capri as a smouldering campfire log: charcoal with glowing cracks that pulse, flickering red-to-yellow fire hair, glowing coal panels, an ash-pale face, and sparks and ash drifting up off her head."
     },
     {
       "folder": "frutiger-aero",
