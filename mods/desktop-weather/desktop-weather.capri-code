@@ -1,0 +1,853 @@
+// capri-mod: 1
+// id: desktop-weather
+// name: Desktop Weather
+// version: 1.0.0
+// author: Issei
+// description: Say "make it snow", "rain", "confetti" or "cherry blossoms" and it falls across your whole desktop.
+
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Windows.Forms;
+using CapriDesktop;
+
+// Weather falls over the whole desktop, on every screen, in a see-through layer that clicks pass straight through, so
+// you can keep working under it. It lands on the taskbar: snow piles up there and melts after it stops, confetti and
+// petals lie there for a few seconds. It hides on a screen while a fullscreen game or video has it. Nothing is saved:
+// after Capri restarts the sky is clear.
+public class DesktopWeather : ICapriMod
+{
+    // The test harness fills this in, so tests see what would be shown instead of windows opening.
+    public Action<string> Show;
+
+    private const RegexOptions Plain = RegexOptions.IgnoreCase | RegexOptions.CultureInvariant;
+    private static readonly Regex Wake = new Regex(@"^\s*(?:(?:hey|hi|ok|okay|yo|oi)[\s,]+)?capri\b[\s,.:;!?-]*|[\s,]+capri[\s.!?]*$", Plain);
+    private static readonly Regex Thing = new Regex(
+        @"\b(?:(snow(?:ing|fall|storm|flakes?)?|blizzard)|(rain(?:ing|storm)?|downpour|drizzl\w*|thunderstorm|storm)|(confetti)|(cherry\s+blossoms?|sakura|blossoms?|(?:flower\s+|cherry\s+)?petals?))\b", Plain);
+    private static readonly Regex Light = new Regex(@"\b(?:light|gentle|soft|little|tiny|bit\s+of|a\s+bit|lightly|drizzl\w*)\b", Plain);
+    private static readonly Regex Heavy = new Regex(@"\b(?:heavy|big|huge|massive|lots\s+of|loads\s+of|crazy|insane|blizzard|downpour|\w*storm|so\s+much|tons\s+of|a\s+lot|heavily|hard)\b", Plain);
+    // a line that's only asking for weather: "make it snow", "let it rain", "confetti!", "can you do heavy rain please"
+    private static readonly Regex Ask = new Regex(
+        @"^(?:(?:can|could|would|will)\s+(?:you|we)\s+)?(?:please\s+)?" +
+        @"(?:make\s+it|let\s+it|let'?s\s+(?:have|get)|start(?:\s+the)?|turn\s+on(?:\s+the)?|bring(?:\s+(?:on|in))?(?:\s+the)?|give\s+(?:me|us)|i\s+want|we\s+need|do|throw|drop|summon|cue|more)?\s*" +
+        @"(?:(?:some|a|an|the|it)\s+)?(?:(?:light|gentle|soft|little|tiny|bit\s+of|heavy|big|huge|massive|lots\s+of|loads\s+of|tons\s+of|crazy|insane)\s+)?" +
+        @"(?:snow(?:ing|fall|storm|flakes?)?|blizzard|rain(?:ing|storm)?|downpour|drizzl\w*|thunderstorm|storm|confetti|cherry\s+blossoms?|sakura|blossoms?|(?:flower\s+|cherry\s+)?petals?)" +
+        @"(?:\s+(?:please|now|again|a\s+(?:little|bit|lot)|lightly|heavily|hard|on\s+(?:my|the)\s+(?:screen|desktop|pc|computer)))*$", Plain);
+    private static readonly Regex StopWord = new Regex(
+        @"^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:stop|end|clear|cancel|turn\s+off|switch\s+off|kill|no\s+more|enough|get\s+rid\s+of|make\s+it\s+stop)\b|\bmake\s+it\s+stop\b|\bclear\s+(?:the\s+)?sk(?:y|ies)\b", Plain);
+    private static readonly Regex About = new Regex(@"\bweather\b", Plain);
+    private static readonly Regex Options = new Regex(@"^what\s+(?:kinds?\s+of\s+)?weather\b|\bweather\b.*\b(?:can\s+you\s+do|do\s+you\s+have|options|is\s+there)\b", Plain);
+
+    private ICapriHost capri;
+    private int kind = -1;
+    private float amount;
+    private Thread ui;
+    private Control post;
+    private Weather weather;
+
+    public void Start(ICapriHost host) { capri = host; }
+
+    public bool Heard(string words)
+    {
+        string line = Wake.Replace(words ?? "", " ").Trim().TrimEnd('!', '.', '?', ' ').Trim();
+        if (line.Length == 0) return false;
+        Match thing = Thing.Match(line);
+        bool bare = kind >= 0 && Regex.IsMatch(line, @"^(?:please\s+)?make\s+it\s+stop$", Plain);
+        if (bare || StopWord.IsMatch(line) && (thing.Success || About.IsMatch(line) || Regex.IsMatch(line, @"\bsk(?:y|ies)\b", Plain)))
+        {
+            if (kind < 0) { capri.Say("Nothing's falling right now."); return true; }
+            capri.Say("Clearing the sky.");
+            kind = -1;
+            Apply("stop");
+            return true;
+        }
+        if (Options.IsMatch(line))
+        {
+            capri.Say("Snow, rain, confetti or cherry blossoms. Say \"make it snow\", add light or heavy if you like, and \"stop the snow\" when you're done.");
+            return true;
+        }
+        if (!thing.Success || !(Ask.IsMatch(line) || Regex.IsMatch(line, @"^let\s+it\s+snow\b", Plain))) return false;
+        int want = thing.Groups[1].Success ? 0 : thing.Groups[2].Success ? 1 : thing.Groups[3].Success ? 2 : 3;
+        float much = Heavy.IsMatch(line) ? 2f : Light.IsMatch(line) ? 0.45f : 1f;
+        if (Regex.IsMatch(line, @"\bdrizzl", Plain)) much = 0.35f;
+        bool same = want == kind && Math.Abs(much - amount) < 0.01f;
+        capri.Say(same ? Already(want) : Hello(want, much));
+        if (same && want != Sky.Confetti) return true;
+        kind = want; amount = much;
+        Apply(Sky.Names[want] + " " + much.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture));
+        return true;
+    }
+
+    private static string Hello(int want, float much)
+    {
+        bool light = much < 0.9f, heavy = much > 1.1f;
+        switch (want)
+        {
+            case Sky.Snow: return light ? "A little snow, coming down." : heavy ? "Blizzard incoming." : "Let it snow.";
+            case Sky.Rain: return much < 0.4f ? "Just a drizzle." : light ? "A light rain." : heavy ? "Downpour. Hope you brought an umbrella." : "Rain's coming in.";
+            case Sky.Confetti: return heavy ? "All the confetti!" : "Confetti!";
+            default: return light ? "A few petals on the breeze." : heavy ? "Full bloom." : "Cherry blossom season.";
+        }
+    }
+
+    private static string Already(int want)
+    {
+        switch (want)
+        {
+            case Sky.Snow: return "It's already snowing.";
+            case Sky.Rain: return "It's already raining.";
+            case Sky.Confetti: return "More confetti!";
+            default: return "The blossoms are already falling.";
+        }
+    }
+
+    public void Stop()
+    {
+        kind = -1;
+        Control target = post;
+        if (target == null) return;
+        try
+        {
+            target.Invoke(new MethodInvoker(delegate
+            {
+                if (weather != null) weather.Close();
+                Application.ExitThread();
+            }));
+        }
+        catch (Exception) { }
+        if (ui != null) ui.Join(2000);
+        post = null; ui = null; weather = null;
+    }
+
+    // Weather lives on its own window thread, whichever thread her ears call from.
+    private void Apply(string what)
+    {
+        if (Show != null) { Show(what); return; }
+        if (ui == null)
+        {
+            ManualResetEvent ready = new ManualResetEvent(false);
+            ui = new Thread(delegate ()
+            {
+                Control made = new Control();
+                made.CreateControl();
+                IntPtr handle = made.Handle;
+                weather = new Weather();
+                post = made;
+                ready.Set();
+                Application.Run();
+                if (weather != null) weather.Close();
+                made.Dispose();
+            });
+            ui.Name = "Desktop Weather";
+            ui.IsBackground = true;
+            ui.SetApartmentState(ApartmentState.STA);
+            ui.Start();
+            ready.WaitOne(5000);
+        }
+        if (post == null) return;
+        try
+        {
+            post.BeginInvoke(new MethodInvoker(delegate
+            {
+                try { weather.Do(what); }
+                catch (Exception error) { capri.Log("weather: " + error); }
+            }));
+        }
+        catch (Exception error) { capri.Log("weather: " + error.Message); }
+    }
+}
+
+// Runs on the weather thread: one see-through window per screen and the clock that moves everything.
+internal sealed class Weather
+{
+    private readonly List<Overlay> overlays = new List<Overlay>();
+    private readonly System.Windows.Forms.Timer beat = new System.Windows.Forms.Timer();
+    private readonly Stopwatch clock = new Stopwatch();
+    private double last, lastCheck, lastTop;
+    private int frames;   // frames drawn, read by tools/weather/Live.cs to report the frame rate
+
+    internal Weather()
+    {
+        beat.Interval = 15;   // as fast as a WinForms timer goes, about 64 frames a second, like her intros
+        beat.Tick += delegate { Tick(); };
+    }
+
+    internal void Do(string what)
+    {
+        if (what == "stop")
+        {
+            foreach (Overlay o in overlays) o.Sky.End();
+            return;
+        }
+        string[] parts = what.Split(' ');
+        float much = float.Parse(parts[parts.Length - 1], System.Globalization.CultureInfo.InvariantCulture);
+        int kind = Array.IndexOf(Sky.Names, what.Substring(0, what.LastIndexOf(' ')));
+        if (overlays.Count == 0)
+        {
+            int seed = Environment.TickCount;
+            foreach (Screen screen in Screen.AllScreens)
+            {
+                Rectangle b = screen.Bounds, work = screen.WorkingArea;
+                // things land on the taskbar when it's along the bottom of this screen, otherwise on the bottom edge
+                float ground = work.Bottom < b.Bottom && work.Top == b.Top ? work.Bottom - b.Top : b.Height;
+                Overlay o = new Overlay(b, new Sky(kind, much, b.Width, b.Height, ground, seed++));
+                overlays.Add(o);
+            }
+            foreach (Overlay o in overlays) { o.Sky.Fill(false); o.Begin(); }
+            clock.Restart(); last = 0; lastCheck = -1; lastTop = 0;
+            beat.Start();
+        }
+        else
+            foreach (Overlay o in overlays) o.Sky.Change(kind, much);
+        if (kind == Sky.Confetti)
+            foreach (Overlay o in overlays) o.Sky.Burst();
+    }
+
+    private void Tick()
+    {
+        double now = clock.Elapsed.TotalSeconds;
+        float dt = (float)Math.Min(0.1, now - last);
+        last = now;
+        if (now - lastCheck > 0.5) { lastCheck = now; Covered(); }
+        bool top = now - lastTop > 2;
+        if (top) lastTop = now;
+        bool any = false;
+        foreach (Overlay o in overlays)
+        {
+            if (o.Paused) continue;
+            o.Sky.Step(dt);
+            o.Draw();
+            frames++;
+            if (top) o.OnTop();
+            if (!o.Sky.Done) any = true;
+        }
+        bool paused = overlays.Exists(delegate (Overlay o) { return o.Paused && !o.Sky.Done; });
+        if (!any && !paused) Close();
+    }
+
+    // Hide the weather on any screen a fullscreen window has (a game, a video), so it never gets in the way there.
+    private void Covered()
+    {
+        IntPtr front = Native.GetForegroundWindow();
+        Rectangle full = Rectangle.Empty;
+        if (front != IntPtr.Zero && !Native.Desktop(front))
+        {
+            uint pid;
+            Native.GetWindowThreadProcessId(front, out pid);
+            Native.RECT r;
+            // a maximized window covers the screen too, but that's just work; fullscreen games and videos aren't maximized
+            if (pid != (uint)Process.GetCurrentProcess().Id && !Native.IsZoomed(front) && Native.GetWindowRect(front, out r))
+            {
+                Rectangle rect = Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom);
+                Rectangle screen = Screen.FromHandle(front).Bounds;
+                if (rect.Contains(screen)) full = screen;
+            }
+        }
+        foreach (Overlay o in overlays) o.Pause(o.Area == full);
+    }
+
+    internal void Close()
+    {
+        beat.Stop();
+        foreach (Overlay o in overlays) o.Close();
+        overlays.Clear();
+    }
+}
+
+// A borderless, click-through, always-on-top window covering one screen. It's drawn with per-pixel alpha straight into
+// a bitmap the window shows (UpdateLayeredWindow), so soft edges stay soft over whatever is behind.
+internal sealed class Overlay : Form
+{
+    internal readonly Sky Sky;
+    internal readonly Rectangle Area;
+    internal bool Paused { get; private set; }
+    private IntPtr screenDc, memDc, dib, old;
+    private Bitmap canvas;
+    private Graphics paint;
+
+    internal Overlay(Rectangle area, Sky sky)
+    {
+        Area = area; Sky = sky;
+        FormBorderStyle = FormBorderStyle.None;
+        ShowInTaskbar = false;
+        StartPosition = FormStartPosition.Manual;
+        Bounds = area;
+        TopMost = true;
+        Text = "Desktop Weather";
+    }
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            CreateParams cp = base.CreateParams;
+            // layered, clicks pass through, no taskbar or alt-tab entry, never takes focus, topmost
+            cp.ExStyle |= 0x80000 | 0x20 | 0x80 | 0x8000000 | 0x8;
+            return cp;
+        }
+    }
+
+    protected override bool ShowWithoutActivation { get { return true; } }
+
+    internal void Begin()
+    {
+        Native.BITMAPINFO info = new Native.BITMAPINFO();
+        info.biSize = 40; info.biWidth = Area.Width; info.biHeight = -Area.Height; info.biPlanes = 1; info.biBitCount = 32;
+        screenDc = Native.GetDC(IntPtr.Zero);
+        memDc = Native.CreateCompatibleDC(screenDc);
+        IntPtr bits;
+        dib = Native.CreateDIBSection(memDc, ref info, 0, out bits, IntPtr.Zero, 0);
+        old = Native.SelectObject(memDc, dib);
+        canvas = new Bitmap(Area.Width, Area.Height, Area.Width * 4, PixelFormat.Format32bppPArgb, bits);
+        paint = Graphics.FromImage(canvas);
+        Show();
+        Draw();
+    }
+
+    internal void Draw()
+    {
+        if (paint == null) return;
+        paint.Clear(Color.Transparent);
+        Sky.Draw(paint);
+        paint.Flush(FlushIntention.Sync);
+        Native.POINT at = new Native.POINT { X = Area.X, Y = Area.Y }, from = new Native.POINT();
+        Native.SIZE size = new Native.SIZE { W = Area.Width, H = Area.Height };
+        Native.BLEND blend = new Native.BLEND { Op = 0, Flags = 0, Alpha = 255, Format = 1 };
+        Native.UpdateLayeredWindow(Handle, screenDc, ref at, ref size, memDc, ref from, 0, ref blend, 2);
+    }
+
+    internal void Pause(bool hide)
+    {
+        if (hide == Paused) return;
+        Paused = hide;
+        if (hide) Hide(); else { Show(); Draw(); }
+    }
+
+    // the taskbar and other topmost windows can come up over it; put it back on top without taking focus
+    internal void OnTop() { Native.SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x1 | 0x2 | 0x10); }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (paint != null) { paint.Dispose(); paint = null; }
+        Sky.Forget();
+        if (canvas != null) { canvas.Dispose(); canvas = null; }
+        if (memDc != IntPtr.Zero) { Native.SelectObject(memDc, old); Native.DeleteObject(dib); Native.DeleteDC(memDc); memDc = IntPtr.Zero; }
+        if (screenDc != IntPtr.Zero) { Native.ReleaseDC(IntPtr.Zero, screenDc); screenDc = IntPtr.Zero; }
+        base.Dispose(disposing);
+    }
+}
+
+internal static class Native
+{
+    [StructLayout(LayoutKind.Sequential)] internal struct POINT { public int X, Y; }
+    [StructLayout(LayoutKind.Sequential)] internal struct SIZE { public int W, H; }
+    [StructLayout(LayoutKind.Sequential)] internal struct RECT { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential, Pack = 1)] internal struct BLEND { public byte Op, Flags, Alpha, Format; }
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct BITMAPINFO
+    {
+        public int biSize, biWidth, biHeight;
+        public short biPlanes, biBitCount;
+        public int biCompression, biSizeImage, biXPelsPerMeter, biYPelsPerMeter, biClrUsed, biClrImportant;
+        public int colors;
+    }
+
+    [DllImport("user32.dll")] internal static extern IntPtr GetDC(IntPtr hwnd);
+    [DllImport("user32.dll")] internal static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
+    [DllImport("gdi32.dll")] internal static extern IntPtr CreateCompatibleDC(IntPtr dc);
+    [DllImport("gdi32.dll")] internal static extern bool DeleteDC(IntPtr dc);
+    [DllImport("gdi32.dll")] internal static extern IntPtr CreateDIBSection(IntPtr dc, ref BITMAPINFO info, uint usage, out IntPtr bits, IntPtr section, uint offset);
+    [DllImport("gdi32.dll")] internal static extern IntPtr SelectObject(IntPtr dc, IntPtr obj);
+    [DllImport("gdi32.dll")] internal static extern bool DeleteObject(IntPtr obj);
+    [DllImport("user32.dll")] internal static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr dst, ref POINT at, ref SIZE size, IntPtr src, ref POINT from, int key, ref BLEND blend, int flags);
+    [DllImport("user32.dll")] internal static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int w, int h, uint flags);
+    [DllImport("user32.dll")] internal static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] internal static extern bool IsZoomed(IntPtr hwnd);
+    [DllImport("user32.dll")] internal static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+    [DllImport("user32.dll")] internal static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr hwnd, System.Text.StringBuilder name, int size);
+
+    // the desktop itself counts as fullscreen-sized, but isn't a game
+    internal static bool Desktop(IntPtr hwnd)
+    {
+        System.Text.StringBuilder name = new System.Text.StringBuilder(64);
+        GetClassName(hwnd, name, 64);
+        string n = name.ToString();
+        return n == "Progman" || n == "WorkerW" || n == "Shell_TrayWnd";
+    }
+}
+
+// The weather itself: everything falling, drawn in her sharp flat style. One Sky per screen. It knows nothing about
+// windows, so the proof tool can draw it into a picture and the mod can draw it over the desktop.
+internal sealed class Sky
+{
+    internal const int Snow = 0, Rain = 1, Confetti = 2, Blossoms = 3;
+    internal static readonly string[] Names = { "snow", "rain", "confetti", "cherry blossoms" };
+
+    private sealed class Bit
+    {
+        public float X, Y, VX, VY, Size, Depth, Angle, Spin, Flip, FlipSpeed, Phase, Age, Life;
+        public int Tone, Shape;
+    }
+
+    private static readonly Color[] Party =
+    {
+        Color.FromArgb(255, 0, 70), Color.FromArgb(0, 226, 120), Color.FromArgb(0, 200, 255),
+        Color.FromArgb(255, 214, 0), Color.FromArgb(150, 96, 255), Color.FromArgb(255, 110, 200)
+    };
+    private static readonly Color PetalLight = Color.FromArgb(255, 196, 220), Petal = Color.FromArgb(252, 150, 192),
+        PetalDeep = Color.FromArgb(214, 70, 128), PetalHeart = Color.FromArgb(150, 24, 76), Pollen = Color.FromArgb(255, 226, 150);
+
+    private readonly List<Bit> falling = new List<Bit>();
+    private readonly List<Bit> settled = new List<Bit>();   // splashes, and confetti and petals lying on the ground
+    private readonly Random rnd;
+    private readonly float width, height, ground, scale;
+    private readonly float[] pile;   // snow lying along the top of the taskbar, one height per 4 px
+    private float time;
+
+    internal int Kind { get; private set; }
+    internal float Amount { get; private set; }
+    internal bool Ending { get; private set; }
+
+    // ground: where things land, the top of the taskbar on this screen
+    internal Sky(int kind, float amount, float width, float height, float ground, int seed)
+    {
+        Kind = kind; Amount = amount;
+        this.width = width; this.height = height; this.ground = ground;
+        scale = height / 1080f;
+        rnd = new Random(seed);
+        pile = new float[(int)(width / 4) + 2];
+    }
+
+    internal bool Done { get { return Ending && falling.Count == 0 && settled.Count == 0 && PileHeight() < 0.5f; } }
+
+    internal void End() { Ending = true; }
+
+    internal void Change(int kind, float amount)
+    {
+        if (kind != Kind) { falling.Clear(); settled.Clear(); Forget(); }
+        Kind = kind; Amount = amount; Ending = false;
+        while (falling.Count > Wanted()) falling.RemoveAt(falling.Count - 1);
+        Fill(false);
+    }
+
+    private int Wanted()
+    {
+        float perMillion = Kind == Snow ? 150 : Kind == Rain ? 260 : Kind == Confetti ? 90 : 55;
+        return (int)(perMillion * Amount * width * height / 1e6f);
+    }
+
+    // Top the sky up to the right number of bits. At the start they wait above the screen at different heights, so
+    // the weather drifts in instead of appearing everywhere at once.
+    internal void Fill(bool everywhere)
+    {
+        while (falling.Count < Wanted()) falling.Add(Make(everywhere ? rnd.Next((int)height) : -rnd.Next((int)(height * (Kind == Rain ? 0.4f : 1f))) - 20));
+    }
+
+    // a confetti cannon from both bottom corners
+    internal void Burst()
+    {
+        int each = (int)(140 * Amount * Math.Sqrt(width * height / 2e6));
+        for (int side = 0; side < 2; side++)
+            for (int i = 0; i < each; i++)
+            {
+                Bit b = Make(0);
+                b.X = side == 0 ? -10 : width + 10;
+                b.Y = ground - 10;
+                double up = 0.9 + rnd.NextDouble() * 0.55;   // 50 to 82 degrees above the floor
+                double a = side == 0 ? -up : -Math.PI + up;
+                float speed = (1250 + 950 * (float)rnd.NextDouble()) * scale;
+                b.VX = (float)Math.Cos(a) * speed; b.VY = (float)Math.Sin(a) * speed;
+                falling.Add(b);
+            }
+    }
+
+    private float R(float lo, float hi) { return lo + (hi - lo) * (float)rnd.NextDouble(); }
+
+    private Bit Make(float y)
+    {
+        Bit b = new Bit();
+        b.Depth = (float)Math.Sqrt(rnd.NextDouble()) * 0.7f + 0.3f;
+        b.X = R(-60, width + 60);
+        b.Y = y;
+        b.Angle = R(0, 6.283f);
+        b.Phase = R(0, 6.283f);
+        b.Flip = R(0, 6.283f);
+        b.Tone = rnd.Next(Party.Length);
+        switch (Kind)
+        {
+            case Snow:
+                b.Size = (2.5f + 12f * b.Depth * b.Depth * R(0.6f, 1.2f)) * scale;
+                b.Shape = b.Size > 7f * scale ? 1 : 0;
+                b.Spin = R(-0.6f, 0.6f);
+                b.VY = (45 + 75 * b.Depth) * scale;
+                break;
+            case Rain:
+                b.Size = (1.2f + 1.6f * b.Depth) * scale;
+                b.VY = (1100 + 900 * b.Depth) * scale;
+                break;
+            case Confetti:
+                b.Size = (12 + 12 * b.Depth) * scale;
+                b.Shape = rnd.Next(10) < 6 ? 0 : rnd.Next(2) == 0 ? 1 : 2;
+                b.Spin = R(-3, 3);
+                b.FlipSpeed = R(4, 11);
+                b.VY = 160 * scale;
+                break;
+            default:
+                b.Size = (14 + 14 * b.Depth) * scale;
+                b.Shape = rnd.Next(10) < 7 ? 0 : 1;   // a single petal, or a whole blossom
+                b.Spin = R(-1.5f, 1.5f);
+                b.FlipSpeed = R(1.5f, 4);
+                b.VY = (60 + 60 * b.Depth) * scale;
+                break;
+        }
+        return b;
+    }
+
+    private float Wind()
+    {
+        double gust = Math.Sin(time * 0.31) * 0.6 + Math.Sin(time * 0.137 + 1.7) * 0.4;
+        float calm = Kind == Snow ? 14 : Kind == Rain ? 170 : Kind == Confetti ? 10 : 40;
+        float swing = Kind == Snow ? 26 : Kind == Rain ? 60 : Kind == Confetti ? 30 : 70;
+        return (calm + swing * (float)gust) * scale;
+    }
+
+    internal float PileHeight()
+    {
+        float most = 0;
+        foreach (float h in pile) most = Math.Max(most, h);
+        return most;
+    }
+
+    private float PileAt(float x)
+    {
+        int i = (int)(x / 4);
+        return i >= 0 && i < pile.Length ? pile[i] : 0;
+    }
+
+    internal void Step(float dt)
+    {
+        time += dt;
+        float wind = Wind();
+        for (int i = falling.Count - 1; i >= 0; i--)
+        {
+            Bit b = falling[i];
+            b.Age += dt;
+            b.Angle += b.Spin * dt;
+            b.Flip += b.FlipSpeed * dt;
+            switch (Kind)
+            {
+                case Snow:
+                    b.X += (wind * b.Depth + (float)Math.Sin(time * 0.9 + b.Phase) * 22 * scale * b.Depth) * dt;
+                    b.Y += b.VY * dt;
+                    break;
+                case Rain:
+                    b.VX = wind * (0.6f + 0.4f * b.Depth);
+                    b.X += b.VX * dt; b.Y += b.VY * dt;
+                    break;
+                case Confetti:
+                    // thrown pieces slow down in the air and settle into a fluttering fall
+                    b.VY += 900 * scale * dt;
+                    // light drag while it's flying out of the cannon, then the air catches it and it flutters
+                    float drag = (float)Math.Exp(-(0.5 + 2.7 * Math.Min(1, b.Age / 1.2)) * dt);
+                    b.VX *= drag; b.VY *= drag;
+                    b.X += (b.VX + wind + (float)Math.Sin(time * 2.2 + b.Phase) * 40 * scale) * dt;
+                    b.Y += b.VY * dt;
+                    break;
+                default:
+                    b.X += (wind * b.Depth * 1.4f + (float)Math.Sin(time * 1.3 + b.Phase) * 45 * scale) * dt;
+                    b.Y += (b.VY + (float)Math.Cos(time * 1.3 + b.Phase) * 18 * scale) * dt;
+                    break;
+            }
+            bool landed = Kind == Rain ? b.Y > ground - 2 * scale && b.Depth > 0.55f
+                        : Kind == Snow ? b.Y > ground - PileAt(b.X) - b.Size * 0.3f && b.Depth > 0.6f
+                        : b.Y > ground - b.Size * 0.4f && b.Depth > 0.55f && b.VY > 0;
+            bool gone = b.Y > height + 40 || b.X < -200 || b.X > width + 200;
+            if (!landed && !gone) continue;
+            if (landed) Land(b);
+            if (Ending || falling.Count > Wanted()) falling.RemoveAt(i);
+            else falling[i] = Make(-rnd.Next(60) - 20);
+        }
+        for (int i = settled.Count - 1; i >= 0; i--)
+        {
+            Bit s = settled[i];
+            s.Age += dt;
+            if (Kind == Rain)
+            {
+                s.VY += 2200 * scale * dt;
+                s.X += s.VX * dt; s.Y += s.VY * dt;
+            }
+            if (s.Age > s.Life) settled.RemoveAt(i);
+        }
+        // the snow pile: settles into a soft ridge, and melts away once the snow has stopped
+        float[] was = (float[])pile.Clone();
+        for (int i = 1; i < pile.Length - 1; i++) pile[i] = was[i] * 0.9f + (was[i - 1] + was[i + 1]) * 0.05f;
+        if (Ending || Kind != Snow)
+            for (int i = 0; i < pile.Length; i++) pile[i] = Math.Max(0, pile[i] - 3 * scale * dt);
+    }
+
+    private void Land(Bit b)
+    {
+        if (Kind == Snow)
+        {
+            int i = (int)(b.X / 4);
+            if (i >= 0 && i < pile.Length) pile[i] = Math.Min(18 * scale, pile[i] + b.Size * 0.5f);
+            return;
+        }
+        if (Kind == Rain)
+        {
+            for (int k = 0; k < 2; k++)
+            {
+                Bit s = new Bit();
+                s.X = b.X; s.Y = ground - 1;
+                s.VX = R(-90, 90) * scale; s.VY = -R(120, 280) * scale;
+                s.Size = b.Size; s.Depth = b.Depth; s.Life = 0.22f;
+                settled.Add(s);
+            }
+            return;
+        }
+        if (settled.Count > 260) return;
+        Bit l = new Bit();
+        l.X = b.X; l.Y = ground - R(0, 3) * scale; l.Size = b.Size; l.Depth = b.Depth; l.Tone = b.Tone; l.Shape = b.Shape;
+        l.Angle = b.Angle; l.Flip = (float)Math.PI * 0.12f * (rnd.Next(2) * 2 - 1); l.Life = R(4, 8);
+        settled.Add(l);
+    }
+
+    // ---------------------------------------------------------------- drawing
+    internal void Draw(Graphics g)
+    {
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.InterpolationMode = InterpolationMode.NearestNeighbor;
+        g.PixelOffsetMode = PixelOffsetMode.Half;
+        if (Kind == Snow || PileHeight() > 0.5f) DrawPile(g);
+        foreach (Bit s in settled) DrawOne(g, s, true);
+        // far ones first, so near ones pass in front
+        List<Bit> order = new List<Bit>(falling);
+        order.Sort(delegate (Bit a, Bit b) { return a.Depth.CompareTo(b.Depth); });
+        foreach (Bit b in order) DrawOne(g, b, false);
+    }
+
+    private static Color Fade(Color c, float alpha) { return Color.FromArgb(Math.Max(0, Math.Min(255, (int)(alpha * 255))), c); }
+
+    private static Color Mix(Color a, Color b, float f)
+    {
+        return Color.FromArgb(a.A, (int)(a.R + (b.R - a.R) * f), (int)(a.G + (b.G - a.G) * f), (int)(a.B + (b.B - a.B) * f));
+    }
+
+    private void DrawOne(Graphics g, Bit b, bool lying)
+    {
+        float fade = lying ? Math.Min(1, (b.Life - b.Age) / 1.2f) : 1;
+        switch (Kind)
+        {
+            case Snow: DrawFlake(g, b); break;
+            case Rain:
+                if (lying) { using (Pen p = new Pen(Fade(Color.FromArgb(200, 220, 255), 0.7f * (1 - b.Age / b.Life)), Math.Max(1, b.Size))) g.DrawLine(p, b.X, b.Y, b.X - b.VX * 0.012f, b.Y - b.VY * 0.012f); }
+                else DrawDrop(g, b);
+                break;
+            case Confetti: DrawConfetti(g, b, fade); break;
+            default: DrawPetal(g, b, fade); break;
+        }
+    }
+
+    private PointF[] Place(Bit b, float[] xy, float sx, float sy)
+    {
+        float c = (float)Math.Cos(b.Angle), s = (float)Math.Sin(b.Angle);
+        PointF[] pts = new PointF[xy.Length / 2];
+        for (int i = 0; i < pts.Length; i++)
+        {
+            float x = xy[i * 2] * sx, y = xy[i * 2 + 1] * sy;
+            pts[i] = new PointF(b.X + x * c - y * s, b.Y + x * s + y * c);
+        }
+        return pts;
+    }
+
+    // Snowflakes and raindrops are each drawn once into a small picture and stamped from then on: smooth lines are the
+    // slow part of a frame, and stamping keeps the weather at a full 60 frames a second.
+    private readonly Dictionary<long, Bitmap> stamps = new Dictionary<long, Bitmap>();
+    private readonly Dictionary<int, SolidBrush> brushes = new Dictionary<int, SolidBrush>();
+
+    private Bitmap Stamp(long key, int w, int h, Action<Graphics> draw)
+    {
+        Bitmap s;
+        if (stamps.TryGetValue(key, out s)) return s;
+        s = new Bitmap(Math.Max(1, w), Math.Max(1, h), PixelFormat.Format32bppPArgb);
+        using (Graphics sg = Graphics.FromImage(s)) { sg.SmoothingMode = SmoothingMode.AntiAlias; draw(sg); }
+        stamps[key] = s;
+        return s;
+    }
+
+    private static void Put(Graphics g, Bitmap s, float left, float top)
+    {
+        g.DrawImage(s, new Rectangle((int)Math.Round(left), (int)Math.Round(top), s.Width, s.Height), 0, 0, s.Width, s.Height, GraphicsUnit.Pixel);
+    }
+
+    // one shared brush per colour (alpha in 16 steps), instead of a new one for every piece every frame
+    private SolidBrush Paint(Color c)
+    {
+        int key = (c.ToArgb() & 0x00FFFFFF) | ((c.A >> 4) << 24);
+        SolidBrush br;
+        if (!brushes.TryGetValue(key, out br)) brushes[key] = br = new SolidBrush(Color.FromArgb(Math.Min(255, (c.A >> 4) * 17), c));
+        return br;
+    }
+
+    internal void Forget()
+    {
+        foreach (Bitmap s in stamps.Values) s.Dispose();
+        stamps.Clear();
+        foreach (SolidBrush br in brushes.Values) br.Dispose();
+        brushes.Clear();
+    }
+
+    private void DrawFlake(Graphics g, Bit b)
+    {
+        // a flake looks the same every 60 degrees (a diamond every 180), so 10 turns of each size and depth cover it
+        int dq = (int)Math.Round(b.Depth * 8), sq = (int)Math.Round(b.Size * 2);
+        double period = b.Shape == 1 ? Math.PI / 3 : Math.PI;
+        double turn = b.Angle % period;
+        if (turn < 0) turn += period;
+        int rq = (int)(turn / period * 10) % 10;
+        float r = sq / 2f, depth = dq / 8f;
+        int n = (int)Math.Ceiling(r * 2 + 4);
+        long key = ((long)b.Shape << 40) + ((long)dq << 32) + ((long)sq << 8) + rq;
+        int shape = b.Shape;
+        Bitmap s = Stamp(key, n, n, delegate (Graphics sg) { Flake(sg, n / 2f, n / 2f, r, rq * period / 10, depth, shape); });
+        Put(g, s, b.X - n / 2f, b.Y - n / 2f);
+    }
+
+    private static void Flake(Graphics g, float x, float y, float r, double angle, float depth, int shape)
+    {
+        float alpha = 0.45f + 0.55f * depth;
+        Color ice = Mix(Color.FromArgb(255, 255, 255), Color.FromArgb(170, 205, 255), 1 - depth);
+        float c = (float)Math.Cos(angle), s = (float)Math.Sin(angle);
+        if (shape == 0)
+        {
+            // a small flake: a sharp little diamond
+            using (SolidBrush br = new SolidBrush(Fade(ice, alpha)))
+                g.FillPolygon(br, new PointF[] { new PointF(x + r * s, y - r * c), new PointF(x + r * 0.6f * c, y + r * 0.6f * s),
+                                                 new PointF(x - r * s, y + r * c), new PointF(x - r * 0.6f * c, y - r * 0.6f * s) });
+            return;
+        }
+        // a big flake: six sharp arms, each with a pair of barbs
+        using (Pen arm = new Pen(Fade(ice, alpha), Math.Max(1.2f, r * 0.17f)))
+        using (Pen barb = new Pen(Fade(ice, alpha * 0.9f), Math.Max(1f, r * 0.12f)))
+        {
+            for (int k = 0; k < 6; k++)
+            {
+                double a = angle + k * Math.PI / 3;
+                g.DrawLine(arm, x, y, x + (float)Math.Cos(a) * r, y + (float)Math.Sin(a) * r);
+                float mx = x + (float)Math.Cos(a) * r * 0.55f, my = y + (float)Math.Sin(a) * r * 0.55f;
+                for (int side = -1; side <= 1; side += 2)
+                {
+                    double ba = a + side * 0.75;
+                    g.DrawLine(barb, mx, my, mx + (float)Math.Cos(ba) * r * 0.36f, my + (float)Math.Sin(ba) * r * 0.36f);
+                }
+            }
+        }
+    }
+
+    private void DrawDrop(Graphics g, Bit b)
+    {
+        // a drop is a streak from its tail down to its head; its look depends only on its depth and the wind's slant
+        int dq = (int)Math.Round(b.Depth * 8);
+        float depth = dq / 8f;
+        float vy = (1100 + 900 * depth) * scale, size = (1.2f + 1.6f * depth) * scale;
+        float len = (0.018f + 0.014f * depth) * vy;
+        int dx = (int)Math.Round(b.VX / b.VY * len);
+        float pad = size + 2;
+        float hx = (dx > 0 ? dx : 0) + pad, hy = len + pad;
+        long key = (2L << 40) + ((long)dq << 16) + (dx + 1000);
+        Bitmap s = Stamp(key, (int)Math.Ceiling(Math.Abs(dx) + pad * 2), (int)Math.Ceiling(len + pad * 2), delegate (Graphics sg)
+        {
+            float alpha = 0.18f + 0.5f * depth;
+            Color water = Color.FromArgb(190, 215, 255);
+            using (Pen tail = new Pen(Fade(water, alpha * 0.45f), size))
+            using (Pen head = new Pen(Fade(Mix(water, Color.White, 0.5f), alpha), size))
+            {
+                sg.DrawLine(tail, hx - dx, hy - len, hx - dx * 0.4f, hy - len * 0.4f);
+                sg.DrawLine(head, hx - dx * 0.4f, hy - len * 0.4f, hx, hy);
+            }
+        });
+        Put(g, s, b.X - hx, b.Y - hy);
+    }
+
+    private void DrawConfetti(Graphics g, Bit b, float fade)
+    {
+        // it flips over as it falls: squashed across one way, lit on its front and darker on its back
+        float c = (float)Math.Cos(b.Flip);
+        float squash = Math.Max(0.1f, Math.Abs(c));
+        Color face = c > 0 ? Mix(Party[b.Tone], Color.White, 0.25f * c) : Mix(Party[b.Tone], Color.Black, 0.45f);
+        float r = b.Size;
+        float[] shape = b.Shape == 0 ? new float[] { -r * 0.5f, -r * 0.3f, r * 0.5f, -r * 0.3f, r * 0.5f, r * 0.3f, -r * 0.5f, r * 0.3f }
+                      : b.Shape == 1 ? new float[] { 0, -r * 0.55f, r * 0.5f, r * 0.4f, -r * 0.5f, r * 0.4f }
+                      : new float[] { -r * 0.14f, -r * 0.8f, r * 0.14f, -r * 0.8f, r * 0.14f, r * 0.8f, -r * 0.14f, r * 0.8f };
+        PointF[] pts = Place(b, shape, squash, 1);
+        g.FillPolygon(Paint(Fade(face, fade)), pts);
+        if (c > 0.5f)
+            g.FillPolygon(Paint(Fade(Color.White, fade * 0.45f * (c - 0.5f) * 2)),
+                new PointF[] { pts[0], pts[1], new PointF((pts[0].X + pts[pts.Length - 1].X) / 2, (pts[0].Y + pts[pts.Length - 1].Y) / 2) });
+    }
+
+    private static readonly float[] PetalShape = { 0, 0, -0.42f, -0.38f, -0.4f, -0.8f, -0.14f, -1f, 0, -0.84f, 0.14f, -1f, 0.4f, -0.8f, 0.42f, -0.38f };
+
+    private void DrawPetal(Graphics g, Bit b, float fade)
+    {
+        float c = (float)Math.Cos(b.Flip);
+        float squash = Math.Max(0.15f, Math.Abs(c));
+        float alpha = fade * (0.6f + 0.4f * b.Depth);
+        float r = b.Size;
+        if (b.Shape == 0)
+        {
+            // one petal tumbling, its far side a deeper pink, a darker vein up the middle
+            float[] p = new float[PetalShape.Length];
+            for (int i = 0; i < p.Length; i += 2) { p[i] = PetalShape[i] * r; p[i + 1] = (PetalShape[i + 1] + 0.5f) * r; }
+            g.FillPolygon(Paint(Fade(c > 0 ? PetalLight : Petal, alpha)), Place(b, p, 1, squash));
+            g.FillPolygon(Paint(Fade(c > 0 ? Petal : PetalDeep, alpha)),
+                Place(b, new float[] { 0, 0.5f * r, -0.12f * r, -0.1f * r, 0, -0.32f * r, 0.12f * r, -0.1f * r }, 1, squash));
+            return;
+        }
+        // a whole blossom: five notched petals round a dark heart with pale stamens
+        for (int k = 0; k < 5; k++)
+        {
+            double a = k * Math.PI * 2 / 5;
+            float ca = (float)Math.Cos(a), sa = (float)Math.Sin(a);
+            float[] p = new float[PetalShape.Length];
+            for (int i = 0; i < p.Length; i += 2)
+            {
+                float x = PetalShape[i] * r * 0.62f, y = PetalShape[i + 1] * r * 0.62f;
+                p[i] = x * ca - y * sa; p[i + 1] = x * sa + y * ca;
+            }
+            Color col = k == 0 || k == 4 ? PetalLight : k == 2 ? PetalDeep : Petal;
+            g.FillPolygon(Paint(Fade(col, alpha)), Place(b, p, 1, squash));
+        }
+        float hr = r * 0.2f;
+        g.FillPolygon(Paint(Fade(PetalHeart, alpha)), Place(b, new float[] { 0, -hr, hr, 0, 0, hr, -hr, 0 }, 1, squash));
+        SolidBrush pollen = Paint(Fade(Pollen, alpha));
+        for (int k = 0; k < 5; k++)
+            {
+                double a = k * Math.PI * 2 / 5 + 0.6;
+                float x = (float)Math.Cos(a) * r * 0.26f, y = (float)Math.Sin(a) * r * 0.26f, d = r * 0.06f;
+                g.FillPolygon(pollen, Place(b, new float[] { x, y - d, x + d, y, x, y + d, x - d, y }, 1, squash));
+            }
+    }
+
+    private void DrawPile(Graphics g)
+    {
+        float most = PileHeight();
+        if (most < 0.5f) return;
+        List<PointF> top = new List<PointF>();
+        top.Add(new PointF(0, ground));
+        for (int i = 0; i < pile.Length; i++) top.Add(new PointF(i * 4, ground - pile[i]));
+        top.Add(new PointF((pile.Length - 1) * 4, ground));
+        RectangleF band = new RectangleF(0, ground - most - 1, width, most + 2);
+        using (LinearGradientBrush br = new LinearGradientBrush(band, Color.FromArgb(250, 255, 255, 255), Color.FromArgb(235, 176, 200, 240), LinearGradientMode.Vertical))
+            g.FillPolygon(br, top.ToArray());
+        using (Pen rim = new Pen(Color.FromArgb(255, 255, 255, 255), Math.Max(1, 1.5f * scale)))
+            g.DrawLines(rim, top.GetRange(1, top.Count - 2).ToArray());
+    }
+}
