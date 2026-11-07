@@ -1,0 +1,639 @@
+// capri-mod: 1
+// id: wardrobe
+// name: Wardrobe
+// version: 1.3.0
+// author: Potato
+// description: Wear several skins at once. "Wear halo" puts Halo on over her skin and colours. "Surprise me" picks a random fit, and "reset your look" starts fresh.
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.IO;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Windows.Forms;
+using CapriDesktop;
+
+public class Wardrobe : ICapriMod
+{
+    public const int Recipe = 1, MostLayers = 6;
+    const BindingFlags Any = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static;
+    const string Lead = @"^(?:(?:hey|yo|ok|okay)\s+)?(?:capri\b[\s,!.]*)?(?:(?:can|could|would|will)\s+(?:you|u)\s+)?(?:please\s+)?";
+    public static readonly Regex WearAsk = new Regex(Lead + @"(?:wear|put\s+on|equip|try\s+on|layer|add)\s+(?<what>.+?)[\s.!?]*$", RegexOptions.IgnoreCase);
+    public static readonly Regex OffAsk = new Regex(Lead + @"(?:take\s+off|remove|unequip|ditch|lose)\s+(?<what>.+?)[\s.!?]*$|" + Lead + @"take\s+(?<what>.+?)\s+off[\s.!?]*$", RegexOptions.IgnoreCase);
+    public static readonly Regex AllOffAsk = new Regex(Lead + @"(?:take\s+(?:everything|it\s+all|all\s+of\s+it|all\s+that)\s+off|(?:take\s+off|remove|unequip)\s+(?:everything|it\s+all|all(?:\s+of\s+it)?)|outfit\s+off)[\s.!?]*$", RegexOptions.IgnoreCase);
+    public static readonly Regex ResetAsk = new Regex(Lead + @"(?:(?:fully\s+|completely\s+)?reset\s+(?:your\s+|ur\s+|her\s+|the\s+)?(?:whole\s+)?(?:looks?|outfits?|style|skins?|wardrobe|appearance|everything)(?:\s+(?:fully|completely|to\s+(?:default|normal|original)))?|wardrobe\s+reset|(?:go\s+)?back\s+to\s+(?:your\s+|ur\s+)?(?:normal|default|original)(?:\s+(?:look|self|skin))?|(?:default|original)\s+look|start\s+fresh|clean\s+slate)[\s.!?]*$", RegexOptions.IgnoreCase);
+    public static readonly Regex RandomAsk = new Regex(Lead + @"(?:(?:a\s+)?random\s+(?:outfit|look|combo|fit|style|skins?)|surprise\s+me|(?:shuffle|randomi[sz]e)(?:\s+(?:your|ur|the|my)\s+(?:outfit|look|style|skins?|fit))?|(?:pick|choose|wear|put\s+on|try)\s+(?:a\s+|something\s+)?random(?:\s+(?:outfit|look|combo|fit|style|skins?))?|(?:dress|style)\s+(?:yourself\s+)?(?:up\s+)?randomly|roll\s+(?:an?\s+)?(?:outfit|look|fit))[\s.!?]*$", RegexOptions.IgnoreCase);
+    public static Random Dice = new Random();
+    public static readonly Regex WhatAsk = new Regex(@"\bwhat\s+(?:are\s+you|r\s+u|are\s+u|you'?re|ya)\s+wearing\b|\bwhat'?s\s+in\s+(?:your|ur)\s+wardrobe\b", RegexOptions.IgnoreCase);
+    static readonly Regex Joins = new Regex(@"\s*(?:,|&|\+|\band\b|\ban\b|\bn\b|\bend\b|\bplus\b|\bwith\b)\s*", RegexOptions.IgnoreCase);
+    static readonly Regex Filler = new Regex(@"^(?:the|your|ur|my|a|an|that|this)\s+|\s+(?:skin|colou?rs?|colou?r\s+set|on|too|as\s+well|again)$", RegexOptions.IgnoreCase);
+
+    const string Opening = @"^((?:(?:hey|yo|ok|okay)\s+)?(?:capri\b[\s,!.]*)?(?:(?:can|could|would|will)\s+(?:you|u)\s+)?(?:please\s+)?)";
+    static readonly KeyValuePair<Regex, string>[] Misheard = Fixes(
+        @"\byo(?=c[aou]pp?r)", "yo ",
+        @"\b(?:c[aou]pp?r(?:i|ee|ie|y|e)|kapri|capree|cupri|kopri|copri)\b", "capri",
+        Opening + @"(?:where|ware|wair|were|weir|wer|we're|whear)\b", "$1wear",
+        Opening + @"(?:(?:but|pud|putt|puts?|poot)\s*-?\s*(?:on|un|in)|puton)\b", "$1put on",
+        Opening + @"(?:take|tape|tech|tak|taken|takes|taik)\s*-?\s*(?:off|of|ov|oaf)\b", "$1take off",
+        Opening + @"(?:tape|tech|tak|taken|takes|taik)\b", "$1take",
+        Opening + @"(?:a\s+quip|equipped|equips|ekip|e\s+quip)\b", "$1equip",
+        Opening + @"(?:re\s+move|removed|removes)\b", "$1remove",
+        @"\b(?:rol+|role|row|rule|rolled)\s*(?:a|of+|uh|the|ah)?\s*f+(?:it|eat|eet|itt)\b", "roll a fit",
+        @"\b(?:sir|sur|ser|sup|su)\s*-?\s*pri[sz]e?d?\s+(?:me|mi|my)\b|\b(?:surprised|suprise|surprize|suprize|surprises)\s+(?:me|mi|my)\b", "surprise me",
+        @"\bran\s*(?:dom|dum|them|done|dumb)\b|\brandum\b|\brandon\b", "random",
+        @"\brandom\s*(?:eyes|ice|ize|ise|eyes?d)\b", "randomize",
+        @"\bout\s*-?\s*(?:fits?|feet|fit's)\b", "outfit",
+        @"\b(?:shovel|shuffled|shuffel|chuffle|shuffles|shuff?le)\b", "shuffle",
+        @"\b(?:re\s*-?\s*set|we\s+set|resets|resent|resett|ree\s*set)\b", "reset",
+        @"\b(?:you're|youre|yer|ya|you|yo|her)\s+(?=(?:look|luck|lock|lok|outfit|style|skins?|fit|wardrobe|appearance)\b)", "your ",
+        @"\b(?:luck|lock|lok|lookk)\b", "look",
+        @"\b(?:where|wear|ware)\s*-?\s*(?:in|ing)\b|\bwar+ing\b|\bwearin\b|\bwering\b|\bwhereing\b|\bwaring\b", "wearing",
+        @"\b(?:what're|whatre|what\s+r|what\s+a|wat\s+are|what\s+ya)\s+(?:you|u|ya)\b|\bwh?atcha\b|\bwatch\s+(?:you|ya)\b", "what are you",
+        @"\b(?:back|bag|bak|bach)\s+(?:to|too|two|2)\s+", "back to ",
+        @"\b(?:norma|normals|nor\s+mal|normel)\b", "normal",
+        @"\b(?:star|stark|start|started|stat)\s+(?:fresh|flesh|freshly|fresch)\b", "start fresh",
+        @"\b(?:the\s+fault|defalt|de\s+fault|defult)\b", "default",
+        @"\b(?:every\s*thing|everythin|every\s+think|evrything|everythink|every\s+fin)\b", "everything",
+        @"\bclean\s+(?:slit|state|sleight|slayed|slay)\b", "clean slate",
+        @"\b(?:hello|hallo|haylo|hay\s*low|hey\s*low|halow|hollow|hale\s*oh|hey\s*lo|halo's)\b", "halo",
+        @"\b(?:glaxy|galaxie|gallaxy|galaxi|galexy|galaxies)\b", "galaxy",
+        @"\bgalaxy\s+(?:here|hare|hear|air|heir)\b", "galaxy hair",
+        @"\b(?:prison|prisim|prizm|prisma|prisms)\b", "prism",
+        @"\bover\s*-?\s*(?:drive|drives|dried|driver)\b|\boverdrived\b", "overdrive",
+        @"\b(?:siber|cyper|cypher|sai\s*ber|cybur)\b", "cyber",
+        @"\bcyber\s+(?:sian|scion|sayan|cian|cyann|psion|sion|sigh\s*an|science)\b", "cyber cyan",
+        @"\b(?:spunch|spunge|sponj|sponch)\b", "sponge",
+        @"\bsponge\s+(?:suite|soot|sweet|suits)\b", "sponge suit",
+        @"\b(?:kitchens|kitchin|chicken|kitchun)\s+sponge\b", "kitchen sponge");
+
+    static KeyValuePair<Regex, string>[] Fixes(params string[] pairs)
+    {
+        KeyValuePair<Regex, string>[] made = new KeyValuePair<Regex, string>[pairs.Length / 2];
+        for (int i = 0; i < made.Length; i++) made[i] = new KeyValuePair<Regex, string>(new Regex(pairs[2 * i], RegexOptions.IgnoreCase | RegexOptions.CultureInvariant), pairs[2 * i + 1]);
+        return made;
+    }
+
+    public static string Fix(string heard)
+    {
+        string text = Regex.Replace((heard ?? "").Trim().Replace('\u2019', '\''), @"\s+", " ");
+        foreach (KeyValuePair<Regex, string> fix in Misheard) text = fix.Key.Replace(text, fix.Value);
+        return Regex.Replace(text, @"\s+", " ").Trim();
+    }
+
+    ICapriHost capri;
+    Control window;
+    object mods;
+    FieldInfo skinChanged, skinFolder;
+    PropertyInfo coloursNow, allMods;
+    MethodInfo setMod, buildTable;
+    Action theirs, mine;
+    string modsFolder, looksFolder, wearingFile, nativeBase, showing;
+    readonly List<string> wearing = new List<string>();
+    readonly object gate = new object();
+    readonly HashSet<string> building = new HashSet<string>();
+    volatile string wanted;
+    bool batching;
+
+    public void Start(ICapriHost host)
+    {
+        capri = host;
+        try
+        {
+            window = (Control)host.GetType().GetField("capri", Any).GetValue(host);
+            mods = window.GetType().GetProperty("ModList", Any).GetValue(window, null);
+            Assembly app = typeof(ICapriMod).Assembly;
+            skinChanged = Need(mods.GetType().GetField("SkinChanged", Any), "Mods.SkinChanged");
+            coloursNow = Need(mods.GetType().GetProperty("ColoursNow", Any), "Mods.ColoursNow");
+            allMods = Need(mods.GetType().GetProperty("All", Any), "Mods.All");
+            setMod = Need(mods.GetType().GetMethod("Set", Any), "Mods.Set");
+            skinFolder = Need(app.GetType("CapriDesktop.Companion").GetField("SkinFolder", Any), "Companion.SkinFolder");
+            buildTable = Need(app.GetType("CapriDesktop.ArtColors").GetMethod("Build", Any), "ArtColors.Build");
+        }
+        catch (Exception error)
+        {
+            capri.Log("Wardrobe can't reach her skins (" + error.Message + "), so it's not doing anything");
+            mods = null;
+            return;
+        }
+        modsFolder = Path.GetDirectoryName(host.Folder.TrimEnd('\\', '/'));
+        looksFolder = Path.Combine(host.Folder, "looks");
+        wearingFile = Path.Combine(host.Folder, "wearing.txt");
+        try { if (File.Exists(wearingFile)) foreach (string id in File.ReadAllLines(wearingFile)) if (id.Trim().Length > 0 && !wearing.Contains(id.Trim())) wearing.Add(id.Trim()); }
+        catch (IOException) { }
+        theirs = (Action)skinChanged.GetValue(mods);
+        mine = Changed;
+        skinChanged.SetValue(mods, mine);
+        nativeBase = (string)skinFolder.GetValue(null);
+        Drop(null);
+        if (wearing.Count > 0) OnWindow(Refresh);
+    }
+
+    static T Need<T>(T found, string name) where T : class
+    {
+        if (found == null) throw new MissingMemberException(name);
+        return found;
+    }
+
+    public bool Heard(string words)
+    {
+        if (mods == null) return false;
+        string said = Fix(words);
+        if (ResetAsk.IsMatch(said))
+        {
+            lock (gate) { wearing.Clear(); Save(); }
+            capri.Say("Back to my original look. Every skin, piece and colour set is off.");
+            OnWindow(ResetAll);
+            return true;
+        }
+        if (RandomAsk.IsMatch(said)) { capri.Say(Shuffle()); return true; }
+        if (AllOffAsk.IsMatch(said))
+        {
+            lock (gate) { wearing.Clear(); Save(); }
+            capri.Say("Took everything off.");
+            OnWindow(Refresh);
+            return true;
+        }
+        if (WhatAsk.IsMatch(said)) { capri.Say(Describe()); return true; }
+        Match asked = OffAsk.Match(said);
+        bool on = !asked.Success;
+        if (on) asked = WearAsk.Match(said);
+        if (!asked.Success) return false;
+        List<string> missing = new List<string>();
+        List<Piece> found = new List<Piece>();
+        foreach (string part in Joins.Split(asked.Groups["what"].Value))
+        {
+            string item = part.Trim();
+            for (int i = 0; i < 3; i++) item = Filler.Replace(item, "").Trim();
+            if (item.Length == 0) continue;
+            Piece piece = Find(item);
+            if (piece == null) missing.Add(item); else if (!found.Exists(p => p.Id == piece.Id)) found.Add(piece);
+        }
+        if (found.Count == 0) return false;
+        List<string> done = new List<string>(), skipped = new List<string>();
+        bool colours = false;
+        lock (gate)
+        {
+            foreach (Piece piece in found)
+            {
+                if (piece.Colours != null) { colours = true; done.Add(piece.Name); continue; }
+                if (on)
+                {
+                    if (piece.Folder == nativeBase || wearing.Contains(piece.Id)) { skipped.Add(piece.Name); continue; }
+                    if (wearing.Count >= MostLayers) { skipped.Add(piece.Name); continue; }
+                    wearing.Add(piece.Id);
+                }
+                else if (!wearing.Remove(piece.Id)) { skipped.Add(piece.Name); continue; }
+                done.Add(piece.Name);
+            }
+            Save();
+        }
+        if (colours) OnWindow(delegate { foreach (Piece piece in found) if (piece.Colours != null) setMod.Invoke(mods, new object[] { piece.Colours, on, null }); });
+        OnWindow(Refresh);
+        string reply = done.Count > 0 ? (on ? "Wearing " : "Took off ") + Listed(done) + "." : on ? "Already wearing " + Listed(skipped) + "." : "Wasn't wearing " + Listed(skipped) + ".";
+        if (done.Count > 0 && skipped.Count > 0) reply += on ? " Already had " + Listed(skipped) + " on." : " Wasn't wearing " + Listed(skipped) + ".";
+        if (missing.Count > 0) reply += " Couldn't find " + Listed(missing) + ".";
+        capri.Say(reply);
+        return true;
+    }
+
+    public void Stop()
+    {
+        if (mods == null) return;
+        wanted = null;
+        try
+        {
+            if ((Action)skinChanged.GetValue(mods) == mine) skinChanged.SetValue(mods, theirs);
+            if (showing != null) OnWindow(delegate { Show(nativeBase, Colours()); });
+        }
+        catch (Exception) { }
+        mods = null;
+    }
+
+    readonly Dictionary<string, double> coverage = new Dictionary<string, double>();
+
+    double Coverage(string folder)
+    {
+        string key = folder + "@" + Directory.GetLastWriteTimeUtc(folder).Ticks;
+        lock (coverage) if (coverage.ContainsKey(key)) return coverage[key];
+        double share = 0;
+        try
+        {
+            int[] original;
+            int width, height;
+            using (Stream stream = typeof(ICapriMod).Assembly.GetManifestResourceStream("Capri.Sprite.idle.png"))
+            using (Bitmap art = new Bitmap(stream)) { width = art.Width; height = art.Height; original = Pixels(art); }
+            int[] worn = Load(Path.Combine(folder, "idle.png"), width, height);
+            if (worn != null)
+            {
+                int body = 0;
+                foreach (int p in original) if ((uint)p >> 24 > 128) body++;
+                share = Changes(original, worn) / (double)Math.Max(1, body);
+            }
+        }
+        catch (Exception error) { capri.Log("Wardrobe couldn't size up " + Path.GetFileName(folder) + ": " + error.Message); }
+        lock (coverage) coverage[key] = share;
+        return share;
+    }
+
+    string Shuffle()
+    {
+        List<Piece> pieces = Pieces(), full = new List<Piece>(), small = new List<Piece>(), sets = new List<Piece>();
+        foreach (Piece piece in pieces)
+            if (piece.Colours != null) sets.Add(piece);
+            else if (Coverage(piece.Folder) > 0.5) full.Add(piece);
+            else small.Add(piece);
+        if (full.Count + small.Count + sets.Count == 0) return "Nothing to pick from yet. Get some skins or colour sets first.";
+        string before;
+        lock (gate) before = string.Join("|", wearing.ToArray()) + "|" + OnColours(sets);
+        List<Piece> picked = new List<Piece>();
+        Piece colour = null;
+        for (int tries = 0; tries < 12; tries++)
+        {
+            picked.Clear();
+            colour = null;
+            if (full.Count > 0 && (small.Count == 0 || Dice.Next(10) < 6)) picked.Add(full[Dice.Next(full.Count)]);
+            List<Piece> extras = new List<Piece>(small);
+            int most = Math.Min(2, extras.Count), least = picked.Count == 0 && extras.Count > 0 ? 1 : 0;
+            for (int n = Dice.Next(least, most + 1); n > 0; n--)
+            {
+                Piece extra = extras[Dice.Next(extras.Count)];
+                extras.Remove(extra);
+                picked.Add(extra);
+            }
+            if (sets.Count > 0 && (picked.Count == 0 || Dice.Next(2) == 0)) colour = sets[Dice.Next(sets.Count)];
+            string now = string.Join("|", picked.ConvertAll(p => p.Id).ToArray()) + "|" + (colour == null ? "" : colour.Id);
+            if (now != before && (picked.Count > 0 || colour != null)) break;
+        }
+        lock (gate)
+        {
+            wearing.Clear();
+            foreach (Piece piece in picked) wearing.Add(piece.Id);
+            Save();
+        }
+        Piece chosen = colour;
+        OnWindow(delegate
+        {
+            batching = true;
+            try
+            {
+                foreach (object mod in (IList)allMods.GetValue(mods, null))
+                {
+                    Type type = mod.GetType();
+                    if (!(bool)type.GetField("On", Any).GetValue(mod)) continue;
+                    object file = type.GetField("File", Any).GetValue(mod);
+                    bool colours = file.GetType().GetField("Colors", Any).GetValue(file) != null;
+                    if ((bool)type.GetField("Skin", Any).GetValue(mod) || (colours && (chosen == null || chosen.Colours != mod))) setMod.Invoke(mods, new object[] { mod, false, null });
+                }
+                if (chosen != null) setMod.Invoke(mods, new object[] { chosen.Colours, true, null });
+            }
+            finally { batching = false; }
+            nativeBase = null;
+            Refresh();
+        });
+        List<string> names = picked.ConvertAll(p => p.Name);
+        if (colour != null) names.Add(colour.Name + " colours");
+        return "Random fit: " + Listed(names) + ".";
+    }
+
+    static string OnColours(List<Piece> sets)
+    {
+        foreach (Piece piece in sets) if ((bool)piece.Colours.GetType().GetField("On", Any).GetValue(piece.Colours)) return piece.Id;
+        return "";
+    }
+
+    void ResetAll()
+    {
+        wanted = null;
+        List<object> on = new List<object>();
+        foreach (object mod in (IList)allMods.GetValue(mods, null))
+        {
+            Type type = mod.GetType();
+            object file = type.GetField("File", Any).GetValue(mod);
+            bool skin = (bool)type.GetField("Skin", Any).GetValue(mod), colours = file.GetType().GetField("Colors", Any).GetValue(file) != null;
+            if ((skin || colours) && (bool)type.GetField("On", Any).GetValue(mod)) on.Add(mod);
+        }
+        batching = true;
+        try { foreach (object mod in on) setMod.Invoke(mods, new object[] { mod, false, null }); }
+        finally { batching = false; }
+        nativeBase = null;
+        Show(null, null);
+        try { if (Directory.Exists(looksFolder)) Directory.Delete(looksFolder, true); }
+        catch (IOException error) { capri.Log("Wardrobe couldn't clear saved looks: " + error.Message); }
+        catch (UnauthorizedAccessException error) { capri.Log("Wardrobe couldn't clear saved looks: " + error.Message); }
+    }
+
+    class Piece { public string Id, Name, Folder; public object Colours; }
+
+    Piece Find(string asked)
+    {
+        string want = Squash(asked);
+        if (want.Length < 2) return null;
+        Piece best = null;
+        int bestScore = 0;
+        foreach (Piece piece in Pieces())
+        {
+            string name = Squash(piece.Name), id = Squash(piece.Id);
+            int score = name == want || id == want ? 5 : name.StartsWith(want) || id.StartsWith(want) ? 4 : want.Length >= 3 && (name.Contains(want) || id.Contains(want)) ? 3 : 0;
+            if (score == 0 && want.Length >= 4)
+            {
+                int near = Math.Min(Math.Min(Distance(want, name), Distance(want, id)), Math.Min(Distance(want, Head(name, want.Length)), Distance(want, Head(id, want.Length))));
+                if (near <= Math.Max(1, want.Length / 5)) score = near == 1 ? 2 : 1;
+            }
+            if (score > bestScore) { best = piece; bestScore = score; }
+        }
+        return best;
+    }
+
+    static string Head(string text, int length) { return text.Length <= length ? text : text.Substring(0, length); }
+
+    static int Distance(string a, string b)
+    {
+        int[] row = new int[b.Length + 1];
+        for (int j = 0; j <= b.Length; j++) row[j] = j;
+        for (int i = 1; i <= a.Length; i++)
+        {
+            int diagonal = row[0];
+            row[0] = i;
+            for (int j = 1; j <= b.Length; j++)
+            {
+                int above = row[j];
+                row[j] = Math.Min(Math.Min(row[j] + 1, row[j - 1] + 1), diagonal + (a[i - 1] == b[j - 1] ? 0 : 1));
+                diagonal = above;
+            }
+        }
+        return row[b.Length];
+    }
+
+    List<Piece> Pieces()
+    {
+        List<Piece> pieces = new List<Piece>();
+        try
+        {
+            foreach (string folder in Directory.GetDirectories(modsFolder, "*-skin"))
+            {
+                string details = Path.Combine(folder, "skin.json");
+                if (!File.Exists(details)) continue;
+                string id = Path.GetFileName(folder);
+                id = id.Substring(0, id.Length - 5);
+                Match name = Regex.Match(File.ReadAllText(details), "\"name\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
+                pieces.Add(new Piece { Id = id, Name = name.Success ? Regex.Unescape(name.Groups[1].Value) : id, Folder = folder });
+            }
+        }
+        catch (IOException) { }
+        foreach (object mod in (IList)allMods.GetValue(mods, null))
+        {
+            object file = mod.GetType().GetField("File", Any).GetValue(mod);
+            if (file.GetType().GetField("Colors", Any).GetValue(file) == null) continue;
+            string named = Regex.Replace((string)file.GetType().GetField("Name", Any).GetValue(file) ?? "", @"^colou?rs?\s*:\s*", "", RegexOptions.IgnoreCase);
+            pieces.Add(new Piece { Id = (string)file.GetType().GetField("Id", Any).GetValue(file), Name = named, Colours = mod });
+        }
+        return pieces;
+    }
+
+    string Describe()
+    {
+        List<string> on = new List<string>();
+        List<Piece> pieces = Pieces();
+        Piece native = pieces.Find(p => p.Folder != null && p.Folder == nativeBase);
+        if (native != null) on.Add(native.Name);
+        lock (gate) foreach (string id in wearing) { Piece piece = pieces.Find(p => p.Id == id && p.Folder != null); if (piece != null) on.Add(piece.Name); }
+        foreach (Piece piece in pieces) if (piece.Colours != null && (bool)piece.Colours.GetType().GetField("On", Any).GetValue(piece.Colours)) on.Add(piece.Name + " colours");
+        return on.Count == 0 ? "Just me, no skins on." : "Wearing " + Listed(on) + ".";
+    }
+
+    static string Listed(List<string> names)
+    {
+        if (names.Count < 2) return string.Join("", names.ToArray());
+        return string.Join(", ", names.GetRange(0, names.Count - 1).ToArray()) + " and " + names[names.Count - 1];
+    }
+
+    static string Squash(string text) { return Regex.Replace((text ?? "").ToLowerInvariant(), @"[^\p{L}\p{N}]+", ""); }
+
+    void Save()
+    {
+        try { File.WriteAllLines(wearingFile, wearing.ToArray()); }
+        catch (IOException error) { capri.Log("Wardrobe couldn't save what she's wearing: " + error.Message); }
+    }
+
+    void OnWindow(Action work)
+    {
+        Action safe = delegate
+        {
+            try { work(); }
+            catch (Exception error) { capri.Log("Wardrobe: " + error.Message); }
+        };
+        try { if (window.IsHandleCreated && !window.IsDisposed) window.BeginInvoke(safe); else safe(); }
+        catch (InvalidOperationException) { safe(); }
+    }
+
+    string[] Colours() { return (string[])coloursNow.GetValue(mods, null); }
+
+    void Changed()
+    {
+        string now = (string)skinFolder.GetValue(null);
+        if (now == null || showing == null || !string.Equals(now, showing, StringComparison.OrdinalIgnoreCase)) nativeBase = now;
+        if (!batching) Refresh();
+    }
+
+    void Refresh()
+    {
+        List<string> layers = Worn();
+        string[] colours = Colours();
+        if (layers.Count == 0) { wanted = null; Show(nativeBase, colours); return; }
+        string key = Key(nativeBase, layers, colours), look = Path.Combine(looksFolder, key);
+        wanted = key;
+        if (File.Exists(Path.Combine(look, "done"))) { Show(look, null); return; }
+        Show(nativeBase, colours);
+        lock (gate) { if (building.Contains(key)) return; building.Add(key); }
+        string from = nativeBase;
+        ThreadPool.QueueUserWorkItem(delegate
+        {
+            try
+            {
+                Build(look, from, layers, colours);
+                Drop(key);
+                OnWindow(delegate { if (wanted == key && mods != null) Show(look, null); });
+            }
+            catch (Exception error) { capri.Log("Wardrobe couldn't put that look together: " + error.Message); }
+            finally { lock (gate) building.Remove(key); }
+        });
+    }
+
+    List<string> Worn()
+    {
+        List<string> layers = new List<string>();
+        lock (gate)
+            foreach (string id in wearing)
+            {
+                string folder = Path.Combine(modsFolder, id + "-skin");
+                if (Directory.Exists(folder) && !string.Equals(folder, nativeBase, StringComparison.OrdinalIgnoreCase)) layers.Add(folder);
+            }
+        return layers;
+    }
+
+    void Show(string folder, string[] colours)
+    {
+        showing = folder != null && folder != nativeBase ? folder : null;
+        skinFolder.SetValue(null, folder);
+        typeof(ICapriMod).Assembly.GetType("CapriDesktop.ArtColors").GetMethod("Set", Any).Invoke(null, new object[] { colours });
+        if (theirs != null) theirs();
+    }
+
+    static string Key(string native, List<string> layers, string[] colours)
+    {
+        StringBuilder all = new StringBuilder("recipe" + Recipe);
+        List<string> parts = new List<string>(layers);
+        if (native != null) parts.Insert(0, "base:" + native);
+        foreach (string part in parts)
+        {
+            string folder = part.StartsWith("base:") ? part.Substring(5) : part;
+            all.Append("|").Append(part.ToLowerInvariant()).Append("@").Append(Directory.Exists(folder) ? Directory.GetLastWriteTimeUtc(folder).Ticks : 0);
+        }
+        all.Append("|").Append(string.Join(",", Array.ConvertAll(colours ?? new string[0], c => c ?? "-")));
+        using (SHA1 sha = SHA1.Create()) return BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(all.ToString()))).Replace("-", "").Substring(0, 16).ToLowerInvariant();
+    }
+
+    void Drop(string keep)
+    {
+        try
+        {
+            if (!Directory.Exists(looksFolder)) return;
+            List<string> looks = new List<string>(Directory.GetDirectories(looksFolder));
+            looks.Sort((one, other) => Directory.GetLastWriteTimeUtc(other).CompareTo(Directory.GetLastWriteTimeUtc(one)));
+            int kept = 0;
+            foreach (string old in looks)
+            {
+                bool done = File.Exists(Path.Combine(old, "done"));
+                if (keep == null) { if (!done) Directory.Delete(old, true); continue; }
+                if (!done || Path.GetFileName(old) == keep) continue;
+                if (++kept >= 4) Directory.Delete(old, true);
+            }
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+
+    void Build(string look, string native, List<string> layers, string[] colours)
+    {
+        string making = look + ".making-" + Guid.NewGuid().ToString("N").Substring(0, 6);
+        Directory.CreateDirectory(making);
+        int[] table = null;
+        if (colours != null && Array.Exists(colours, c => c != null)) table = (int[])buildTable.Invoke(null, new object[] { colours });
+        Assembly app = typeof(ICapriMod).Assembly;
+        foreach (string resource in app.GetManifestResourceNames())
+        {
+            if (!resource.StartsWith("Capri.Sprite.", StringComparison.Ordinal) || !resource.EndsWith(".png", StringComparison.Ordinal)) continue;
+            string name = resource.Substring("Capri.Sprite.".Length);
+            int width, height;
+            int[] original;
+            using (Stream stream = app.GetManifestResourceStream(resource))
+            using (Bitmap art = new Bitmap(stream)) { width = art.Width; height = art.Height; original = Pixels(art); }
+            int[] result = native != null ? Load(Path.Combine(native, name), width, height) : null;
+            if (result == null) result = (int[])original.Clone();
+            if (table != null) Tint(result, table);
+            List<KeyValuePair<int, int[]>> worn = new List<KeyValuePair<int, int[]>>();
+            foreach (string layer in layers)
+            {
+                int[] pixels = Load(Path.Combine(layer, name), width, height);
+                if (pixels != null) worn.Add(new KeyValuePair<int, int[]>(Changes(original, pixels), pixels));
+            }
+            worn.Sort((one, other) => other.Key.CompareTo(one.Key));
+            foreach (KeyValuePair<int, int[]> layer in worn) Layer(original, result, layer.Value);
+            using (Bitmap made = Picture(result, width, height)) made.Save(Path.Combine(making, name), ImageFormat.Png);
+        }
+        File.WriteAllText(Path.Combine(making, "done"), "");
+        if (Directory.Exists(look)) Directory.Delete(look, true);
+        Directory.Move(making, look);
+    }
+
+    static int[] Load(string file, int width, int height)
+    {
+        if (!File.Exists(file)) return null;
+        using (MemoryStream bytes = new MemoryStream(File.ReadAllBytes(file)))
+        using (Bitmap art = new Bitmap(bytes))
+            return art.Width == width && art.Height == height ? Pixels(art) : null;
+    }
+
+    static int[] Pixels(Bitmap art)
+    {
+        using (Bitmap plain = new Bitmap(art.Width, art.Height, PixelFormat.Format32bppArgb))
+        {
+            using (Graphics g = Graphics.FromImage(plain))
+            {
+                g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
+                g.DrawImage(art, new Rectangle(0, 0, art.Width, art.Height));
+            }
+            int[] pixels = new int[art.Width * art.Height];
+            BitmapData data = plain.LockBits(new Rectangle(0, 0, art.Width, art.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            try { for (int y = 0; y < art.Height; y++) Marshal.Copy(data.Scan0 + y * data.Stride, pixels, y * art.Width, art.Width); }
+            finally { plain.UnlockBits(data); }
+            return pixels;
+        }
+    }
+
+    static Bitmap Picture(int[] pixels, int width, int height)
+    {
+        Bitmap made = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+        BitmapData data = made.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+        try { for (int y = 0; y < height; y++) Marshal.Copy(pixels, y * width, data.Scan0 + y * data.Stride, width); }
+        finally { made.UnlockBits(data); }
+        return made;
+    }
+
+    static void Tint(int[] pixels, int[] table)
+    {
+        for (int i = 0; i < pixels.Length; i++)
+        {
+            int p = pixels[i];
+            if (((uint)p >> 24) == 0) continue;
+            pixels[i] = (p & unchecked((int)0xFF000000)) | table[((p >> 18) & 63) << 12 | ((p >> 10) & 63) << 6 | ((p >> 2) & 63)];
+        }
+    }
+
+    public static void Layer(int[] original, int[] result, int[] worn)
+    {
+        for (int i = 0; i < worn.Length; i++)
+        {
+            int o = original[i], l = worn[i];
+            int oa = (int)((uint)o >> 24), la = (int)((uint)l >> 24);
+            if (oa == 0 && la == 0) continue;
+            int dr = (l >> 16 & 255) - (o >> 16 & 255), dg = (l >> 8 & 255) - (o >> 8 & 255), db = (l & 255) - (o & 255);
+            int biggest = Math.Max(Math.Abs(la - oa), Math.Max(Math.Abs(dr), Math.Max(Math.Abs(dg), Math.Abs(db))));
+            if (biggest <= 6) continue;
+            int b = result[i];
+            if (b == o) { result[i] = l; continue; }
+            if (oa < 24) { result[i] = Over(l, b); continue; }
+            if (la < oa - 48 || Math.Max(Math.Abs(dr), Math.Max(Math.Abs(dg), Math.Abs(db))) > 96) { result[i] = la >= 250 ? l : Over(l, b); continue; }
+            int ba = (int)((uint)b >> 24);
+            result[i] = Math.Max(ba, la) << 24 | Clamp((b >> 16 & 255) + dr) << 16 | Clamp((b >> 8 & 255) + dg) << 8 | Clamp((b & 255) + db);
+        }
+    }
+
+    static int Changes(int[] original, int[] worn)
+    {
+        int changed = 0;
+        for (int i = 0; i < worn.Length; i++)
+        {
+            int o = original[i], l = worn[i];
+            if (o == l || ((uint)o >> 24 == 0 && (uint)l >> 24 == 0)) continue;
+            if (Math.Abs((int)((uint)o >> 24) - (int)((uint)l >> 24)) > 6 || Math.Abs((o >> 16 & 255) - (l >> 16 & 255)) > 6 || Math.Abs((o >> 8 & 255) - (l >> 8 & 255)) > 6 || Math.Abs((o & 255) - (l & 255)) > 6) changed++;
+        }
+        return changed;
+    }
+
+    static int Clamp(int v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
+
+    static int Over(int top, int under)
+    {
+        double ta = ((uint)top >> 24) / 255.0, ua = ((uint)under >> 24) / 255.0, a = ta + ua * (1 - ta);
+        if (a <= 0) return 0;
+        Func<int, int> mix = shift => Clamp((int)Math.Round(((top >> shift & 255) * ta + (under >> shift & 255) * ua * (1 - ta)) / a));
+        return Clamp((int)Math.Round(a * 255)) << 24 | mix(16) << 16 | mix(8) << 8 | mix(0);
+    }
+}
