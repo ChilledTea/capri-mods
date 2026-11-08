@@ -1,0 +1,363 @@
+// capri-mod: 1
+// id: capri-bezel-led
+// name: Capri Bezel LED
+// version: 0.5.2
+// author: Dominik20074
+// description: Adds a music reactive glow to the screen edges.
+using System;
+using System.Drawing;
+using System.Collections.Generic;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Reflection;
+using System.Windows.Forms;
+using CapriDesktop;
+
+public sealed class CapriBezelLed : ICapriMod
+{
+    private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+    private ICapriHost host;
+    private object owner, groove, clock;
+    private FieldInfo music;
+    private MethodInfo locked;
+    private Timer timer;
+    private Edge[] edges;
+    private bool enabled = true;
+    private Rectangle screen;
+    private Control frame, toggle, hologram;
+    private PropertyInfo checkedProperty;
+    private string settings;
+    private readonly Dictionary<Control,int> shifted = new Dictionary<Control,int>();
+    private List<KeyValuePair<Control,int>> pageRows;
+    private Dictionary<Control,int> built, tops;
+    private List<Control> scrolled;
+    private MethodInfo closeGaps;
+    private double strength;
+    private System.Diagnostics.Stopwatch time;
+
+    public void Start(ICapriHost capri)
+    {
+        host = capri;
+        owner = capri.GetType().GetField("capri", Private).GetValue(capri);
+        Type type = owner.GetType();
+        music = type.GetField("musicOn", Private);
+        groove = type.GetField("groove", Private).GetValue(owner);
+        clock = type.GetField("clock", Private).GetValue(owner);
+        locked = groove.GetType().GetMethod("Locked", Private);
+        if (music == null || locked == null || !(clock is System.Diagnostics.Stopwatch))
+            throw new NotSupportedException("Capri music interface is unavailable.");
+        time = (System.Diagnostics.Stopwatch)clock;
+        edges = new[] { new Edge(0), new Edge(1), new Edge(2), new Edge(3) };
+        settings = Path.Combine(host.Folder, "enabled.txt");
+        if (File.Exists(settings)) enabled = File.ReadAllText(settings).Trim() != "off";
+        AddToggle();
+        timer = new Timer { Interval = 40 };
+        timer.Tick += Tick;
+        timer.Start();
+    }
+
+    private void Tick(object sender, EventArgs args)
+    {
+        try
+        {
+            SyncToggle();
+            double now = time.Elapsed.TotalSeconds;
+            bool playing = enabled && (bool)music.GetValue(owner);
+            double target = 0;
+            if (playing)
+            {
+                object[] beat = { 0d, 0d };
+                if ((bool)locked.Invoke(groove, beat) && (double)beat[0] > 0)
+                {
+                    double phase = (now - (double)beat[1]) * (double)beat[0] / 60;
+                    phase -= Math.Floor(phase);
+                    target = 0.38 + 0.60 * Math.Exp(-phase * 4);
+                }
+                else target = 0.32 + 0.15 * (1 + Math.Sin(now * 3));
+            }
+            strength += (target - strength) * (target > strength ? 0.62 : 0.18);
+            if (strength < 0.015)
+            {
+                foreach (Edge edge in edges) if (edge.Visible) edge.Hide();
+                return;
+            }
+            Rectangle area = Screen.PrimaryScreen.Bounds;
+            if (area != screen)
+            {
+                screen = area;
+                int w = Math.Max(36, Math.Min(84, area.Height / 17));
+                int topGlow = w + w / 2;
+                edges[0].CornerDepth = w;
+                edges[0].Bounds = new Rectangle(area.Left, area.Top, area.Width, topGlow);
+                edges[1].Bounds = new Rectangle(area.Left, area.Bottom - w, area.Width, w);
+                edges[2].Bounds = new Rectangle(area.Left, area.Top + topGlow, w, area.Height - topGlow - w);
+                edges[3].Bounds = new Rectangle(area.Right - w, area.Top + topGlow, w, area.Height - topGlow - w);
+            }
+            foreach (Edge edge in edges)
+            {
+                edge.PaintGlow(now * 48, strength);
+                if (!edge.Visible) edge.Show();
+            }
+        }
+        catch (Exception error)
+        {
+            Stop();
+            host.Log("Bezel LED stopped: " + error.GetBaseException().Message);
+        }
+    }
+
+    public bool Heard(string words)
+    {
+        string command = (words ?? "").Trim().TrimEnd('.', '!', '?').ToLowerInvariant();
+        if (command != "bezel on" && command != "bezel off") return false;
+        Enable(command == "bezel on");
+        host.Say(enabled ? "Bezel lights on." : "Bezel lights off.");
+        return true;
+    }
+
+    private void Enable(bool value)
+    {
+        enabled = value;
+        if (toggle != null && (bool)checkedProperty.GetValue(toggle, null) != value)
+            checkedProperty.SetValue(toggle, value, null);
+        try { File.WriteAllText(settings, value ? "on" : "off"); }
+        catch (IOException error) { host.Log("Bezel LED settings: " + error.Message); }
+        catch (UnauthorizedAccessException error) { host.Log("Bezel LED settings: " + error.Message); }
+    }
+
+    private void AddToggle()
+    {
+        FieldInfo mainframe = owner.GetType().GetField("mainframe", Private);
+        frame = mainframe == null ? null : mainframe.GetValue(owner) as Control;
+        if (frame == null) return;
+        Type type = frame.GetType();
+        FieldInfo anchor = type.GetField("hologram", Private);
+        hologram = anchor == null ? null : anchor.GetValue(frame) as Control;
+        MethodInfo make = type.GetMethod("Switch", Private, null,
+            new[] { typeof(string), typeof(int), typeof(int), typeof(EventHandler) }, null);
+        if (hologram == null || make == null) return;
+        pageRows = type.GetField("pageLeft", Private).GetValue(frame) as List<KeyValuePair<Control,int>>;
+        built = type.GetField("built", Private).GetValue(frame) as Dictionary<Control,int>;
+        tops = type.GetField("tops", Private).GetValue(frame) as Dictionary<Control,int>;
+        scrolled = type.GetField("scrolled", Private).GetValue(frame) as List<Control>;
+        closeGaps = type.GetMethod("CloseGaps", Private);
+        int anchorTop;
+        if (pageRows == null || built == null || tops == null || scrolled == null ||
+            closeGaps == null || !built.TryGetValue(hologram, out anchorTop)) return;
+        int left = pageRows.Find(entry => entry.Key == hologram).Value;
+        EventHandler change = delegate { if (toggle != null) Enable((bool)checkedProperty.GetValue(toggle, null)); };
+        toggle = make.Invoke(frame, new object[] { "Music Light", left - 28, anchorTop + 25, change }) as Control;
+        if (toggle == null) return;
+        checkedProperty = toggle.GetType().GetProperty("Checked", Private);
+        if (checkedProperty == null) { toggle.Dispose(); toggle = null; return; }
+
+        int column = (int)type.GetField("Column", BindingFlags.Static | BindingFlags.NonPublic).GetRawConstantValue();
+        foreach (KeyValuePair<Control,int> entry in pageRows)
+        {
+            int y;
+            if (entry.Value < column || !built.TryGetValue(entry.Key, out y) || y <= anchorTop) continue;
+            shifted.Add(entry.Key, y);
+            built[entry.Key] = y + 28;
+        }
+        pageRows.Add(new KeyValuePair<Control,int>(toggle, left));
+        built[toggle] = anchorTop + 28;
+        tops[toggle] = hologram.Top + 28;
+        MethodInfo scroll = type.GetMethod("Scrolls", Private);
+        if (scroll != null) scroll.Invoke(frame, new object[] { toggle });
+        else scrolled.Add(toggle);
+        checkedProperty.SetValue(toggle, enabled, null);
+        closeGaps.Invoke(frame, null);
+        SyncToggle();
+    }
+
+    private void SyncToggle()
+    {
+        if (toggle == null || toggle.IsDisposed || hologram.IsDisposed) return;
+        int step = (int)Math.Round(hologram.Height * 28.0 / 22);
+        toggle.SetBounds(hologram.Left, hologram.Top + step, hologram.Width, hologram.Height);
+        toggle.Font = hologram.Font;
+        toggle.Visible = hologram.Visible;
+        toggle.TabStop = hologram.TabStop;
+    }
+
+    private void RemoveToggle()
+    {
+        if (toggle == null) return;
+        pageRows.RemoveAll(entry => entry.Key == toggle);
+        built.Remove(toggle);
+        tops.Remove(toggle);
+        scrolled.Remove(toggle);
+        foreach (KeyValuePair<Control,int> entry in shifted) built[entry.Key] = entry.Value;
+        shifted.Clear();
+        toggle.Dispose();
+        toggle = null;
+        if (!frame.IsDisposed) closeGaps.Invoke(frame, null);
+    }
+
+    public void Stop()
+    {
+        if (timer != null) { timer.Stop(); timer.Dispose(); timer = null; }
+        if (edges != null) { foreach (Edge edge in edges) edge.Dispose(); edges = null; }
+        RemoveToggle();
+    }
+
+    private sealed class Edge : Form
+    {
+        private readonly int side;
+        internal int CornerDepth;
+
+        private static Color Spectrum(double hue)
+        {
+            hue = (hue % 360 + 360) % 360 / 60;
+            int sector = (int)hue;
+            int rising = (int)(255 * (hue - sector));
+            int falling = 255 - rising;
+            switch (sector)
+            {
+                case 0: return Color.FromArgb(255, rising, 0);
+                case 1: return Color.FromArgb(falling, 255, 0);
+                case 2: return Color.FromArgb(0, 255, rising);
+                case 3: return Color.FromArgb(0, falling, 255);
+                case 4: return Color.FromArgb(rising, 0, 255);
+                default: return Color.FromArgb(255, 0, falling);
+            }
+        }
+
+internal Edge(int edge)
+        {
+            side = edge;
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            StartPosition = FormStartPosition.Manual;
+            TopMost = true;
+            DoubleBuffered = true;
+        }
+
+        protected override bool ShowWithoutActivation { get { return true; } }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams style = base.CreateParams;
+                style.ExStyle |= 0x00080000 | 0x00000020 | 0x08000000 | 0x00000080;
+                return style;
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct Pair
+        {
+            internal int X, Y;
+            internal Pair(int x, int y) { X = x; Y = y; }
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct BitmapHeader
+        {
+            internal int Size, Width, Height;
+            internal short Planes, Bits;
+            internal int Compression, ImageSize, XDensity, YDensity, Colors, Important;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct Blend
+        {
+            internal byte Operation, Flags, Opacity, AlphaFormat;
+        }
+
+        [DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleDC(IntPtr dc);
+        [DllImport("gdi32.dll")] private static extern bool DeleteDC(IntPtr dc);
+        [DllImport("gdi32.dll")] private static extern IntPtr CreateDIBSection(IntPtr dc, ref BitmapHeader header, uint usage, out IntPtr pixels, IntPtr section, uint offset);
+        [DllImport("gdi32.dll")] private static extern IntPtr SelectObject(IntPtr dc, IntPtr obj);
+        [DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr obj);
+        [DllImport("user32.dll", SetLastError = true)] private static extern bool UpdateLayeredWindow(IntPtr window, IntPtr screenDc, ref Pair at, ref Pair size, IntPtr sourceDc, ref Pair source, int key, ref Blend blend, int flags);
+
+        private IntPtr dc, bitmap, oldBitmap, pixels;
+        private int width, height;
+        private int[] data;
+
+        private void ReleaseSurface()
+        {
+            if (bitmap != IntPtr.Zero)
+            {
+                SelectObject(dc, oldBitmap);
+                DeleteObject(bitmap);
+                bitmap = IntPtr.Zero;
+            }
+            if (dc != IntPtr.Zero) { DeleteDC(dc); dc = IntPtr.Zero; }
+            data = null;
+        }
+
+        private void Surface(int w, int h)
+        {
+            if (data != null && width == w && height == h) return;
+            ReleaseSurface();
+            width = w;
+            height = h;
+            dc = CreateCompatibleDC(IntPtr.Zero);
+            if (dc == IntPtr.Zero) throw new InvalidOperationException("Could not create glow surface.");
+            BitmapHeader header = new BitmapHeader { Size = 40, Width = w, Height = -h, Planes = 1, Bits = 32 };
+            bitmap = CreateDIBSection(dc, ref header, 0, out pixels, IntPtr.Zero, 0);
+            if (bitmap == IntPtr.Zero) throw new InvalidOperationException("Could not create glow bitmap.");
+            oldBitmap = SelectObject(dc, bitmap);
+            data = new int[w * h];
+        }
+
+        internal void PaintGlow(double hue, double strength)
+        {
+            int w = Width, h = Height;
+            if (w <= 0 || h <= 0) return;
+            Surface(w, h);
+            bool horizontal = side < 2;
+            bool reverse = side == 1 || side == 2;
+            int sequence = side == 0 ? 0 : side == 3 ? 1 : side == 1 ? 2 : 3;
+            int length = horizontal ? w : h;
+            int depth = horizontal ? h : w;
+            Color[] rainbow = new Color[length];
+            for (int i = 0; i < length; i++)
+            {
+                double t = i / (double)Math.Max(1, length - 1);
+                rainbow[i] = Spectrum(hue + 90 * (sequence + (reverse ? 1 - t : t)));
+            }
+            int[] alpha = new int[depth];
+            int[] shine = new int[depth];
+            for (int i = 0; i < depth; i++)
+            {
+                double t = i / (double)Math.Max(1, depth - 1);
+                alpha[i] = (int)(235 * Math.Exp(-3 * t * t) * (1 - t) * (1 - t));
+                shine[i] = (int)(100 * Math.Exp(-t * 24));
+            }
+            for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+            {
+                int d = side == 0 ? y : side == 1 ? h - 1 - y : side == 2 ? x : w - 1 - x;
+                if (horizontal && side != 0) d = Math.Min(d, Math.Min(x, w - 1 - x));
+                Color color = rainbow[horizontal ? x : y];
+                int a = alpha[d], white = shine[d];
+                if (side == 0 && CornerDepth > 1)
+                {
+                    double t = Math.Min(1, Math.Min(x, w - 1 - x) / (double)(CornerDepth - 1));
+                    int cornerAlpha = (int)(235 * Math.Exp(-3 * t * t) * (1 - t) * (1 - t));
+                    a = Math.Max(a, cornerAlpha);
+                    white = Math.Max(white, (int)(100 * Math.Exp(-t * 24)));
+                }
+                int red = (color.R + (255 - color.R) * white / 255) * a / 255;
+                int green = (color.G + (255 - color.G) * white / 255) * a / 255;
+                int blue = (color.B + (255 - color.B) * white / 255) * a / 255;
+                data[y * w + x] = (a << 24) | (red << 16) | (green << 8) | blue;
+            }
+            Marshal.Copy(data, 0, pixels, data.Length);
+            Pair at = new Pair(Left, Top), size = new Pair(w, h), origin = new Pair();
+            Blend blend = new Blend { Opacity = (byte)(255 * strength), AlphaFormat = 1 };
+            if (!UpdateLayeredWindow(Handle, IntPtr.Zero, ref at, ref size, dc, ref origin, 0, ref blend, 2))
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) ReleaseSurface();
+            base.Dispose(disposing);
+        }
+    }
+}
