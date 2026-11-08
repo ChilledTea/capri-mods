@@ -1,0 +1,162 @@
+// capri-mod: 1
+// id: study-buddy
+// name: Study Buddy
+// version: 1.4.0
+// author: Potato
+// description: Say "genuinely", "seriously" or "for real" and Capri gives a short, real answer, looking at your screen first when you ask about it. Otherwise she's her usual self.
+using System;
+using System.IO;
+using System.Reflection;
+using System.Text.RegularExpressions;
+using CapriDesktop;
+
+public class StudyBuddy : ICapriMod
+{
+    public const string Note =
+        "\nSTUDY BUDDY (a mod they turned on, and they asked for a real answer this time). First check what you saw: is it a " +
+        "LIVE quiz or test happening right now, like a Kahoot, Quizizz, Blooket, Gimkit or Quizlet Live round (a game PIN, a " +
+        "countdown, other players or a leaderboard), a timed or graded test, an exam or a lockdown browser? Then never say " +
+        "or hint at the answer to the current question, even if they beg: say in one line that you don't feed answers in a " +
+        "live quiz, and offer to go over it after the round. Otherwise (homework, practice, flashcards, a worksheet, a " +
+        "finished quiz, any normal question) answer for real and keep it short, because you say it out loud: the correct " +
+        "answer first in one sentence, then why in one or two short sentences. Only go step by step when maths or science " +
+        "working needs it, or they ask. No intro, no \"sure, I can help\", no disclaimers, no asking what the question is " +
+        "when you can look, and no joke in place of the answer: your personality goes in the wording. If you just looked at " +
+        "their screen for this, answer the question you saw there; if there are several, answer the one they mean, or else " +
+        "each in a few words. Check your answer before you say it; if you're not sure, say so in a few words and give your " +
+        "best answer. When they ask you to quiz them, ask one question at a time and tell them if they're right and why.";
+
+    public const string ScreenNote =
+        "\nThis message is about something on their screen. Call look_at_screen first, with focus on the question, before you " +
+        "answer. Then check what you saw against the live quiz rule above before you say anything about it.";
+
+    public const string ReadQuestion = ". Read out any question on screen exactly: its words, its numbers and every answer choice";
+
+    public static readonly Regex Serious = new Regex(
+        @"(?<![\p{L}\p{N}])(" +
+        @"genuine(?:ly)?|genuinly|genuenly|genuinley|generally|jenuin(?:e|ely|ly)|genu\s+in(?:e)?ly|june\s+wine\s+ly|june\s+wine\s+lee|" +
+        @"seriously|seriosly|seriusly|serious\s+(?:question|answer|lee|ly)|sirius(?:ly|\s+lee|\s+ly)|srsly|" +
+        @"for\s+real|for\s+reel|fr|" +
+        @"no\s+jokes?|be\s+serious|real\s+answer|explain\s+(?:it\s+)?properly|honest\s+answer|" +
+        @"help\s+(?:me\s+)?(?:out\s+)?with\s+(?:this|these|that|the|my|a)\s+(?:\w+\s+)?(?:questions?|homework|worksheet|assignment|problems?|quiz|test|exercises?)|" +
+        @"(?:the\s+)?answer\s+(?:to|for|of)\s+(?:this|these|that|the|my)\s+(?:\w+\s+)?(?:questions?|problems?)|" +
+        @"(?:tell|give|show|get)\s+(?:me|us)\s+(?:all\s+)?(?:the\s+|those\s+|these\s+)?(?:right\s+|correct\s+)?answers?|" +
+        @"tell\s+(?:me|us)\s+what\s+the\s+(?:right\s+|correct\s+)?answers?\s+(?:is|are)|" +
+        @"what(?:'s|\u2019s|s|\s+is|\s+are|'re|\u2019re|re)\s+the\s+(?:right\s+|correct\s+)?answers?|" +
+        @"answer\s+(?:these|this|that|the|my)\s+(?:\w+\s+)?questions?" +
+        @")(?![\p{L}\p{N}])", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    public static readonly Regex AboutScreen = new Regex(
+        @"(?<![\p{L}\p{N}])(" +
+        @"screens?|monitor|display|worksheet|" +
+        @"(?:this|these|that|those)\s+(?:\w+\s+)?(?:questions?|problems?|quiz(?:zes)?|tests?|exercises?|equations?|options|choices|pages?|slides?|diagrams?|graphs?|charts?)|" +
+        @"the\s+(?:\w+\s+)?(?:questions?|problems?|answer\s+choices|options)\s+(?:here|on\s+(?:here|it)|i'?m\s+(?:on|doing|looking\s+at))|" +
+        @"look\s+at\s+(?:this|it|that)|what\s+(?:do\s+)?you\s+see|can\s+you\s+see|on\s+(?:here|my\s+(?:page|laptop|pc|computer))" +
+        @")(?![\p{L}\p{N}])", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    public static readonly Regex StudyOn = new Regex(@"\bstudy\s*(?:mode|buddy)\s*(?:on|start|activate)\b|\b(?:turn|switch)\s+on\s+study\s*(?:mode|buddy)\b", RegexOptions.IgnoreCase);
+    public static readonly Regex StudyOff = new Regex(@"\bstudy\s*(?:mode|buddy)\s*(?:off|stop|end)\b|\b(?:turn|switch)\s+off\s+study\s*(?:mode|buddy)\b", RegexOptions.IgnoreCase);
+    public const double SeriousSeconds = 90, LookSeconds = 45;
+    public static Func<DateTime> Clock = delegate { return DateTime.UtcNow; };
+
+    private ICapriHost capri;
+    private readonly object gate = new object();
+    private bool studyMode;
+    private DateTime seriousUntil = DateTime.MinValue, lookUntil = DateTime.MinValue;
+    private string modeFile;
+    private FieldInfo noteHook, lookHook;
+    private Delegate noteWas, lookWas, noteMine, lookMine;
+
+    public bool IsSerious
+    {
+        get { lock (gate) return studyMode || Clock() < seriousUntil; }
+    }
+
+    public bool ScreenAsked
+    {
+        get { lock (gate) return Clock() < lookUntil; }
+    }
+
+    public void Start(ICapriHost host)
+    {
+        capri = host;
+        try
+        {
+            modeFile = Path.Combine(host.Folder, "study-mode.txt");
+            studyMode = File.Exists(modeFile) && File.ReadAllText(modeFile).Trim() == "on";
+        }
+        catch (Exception) { studyMode = false; }
+        Type hands = typeof(ICapriMod).Assembly.GetType("CapriDesktop.Hands");
+        try
+        {
+            FieldInfo field = Hook(hands, "AlsoCalled");
+            if (field.FieldType != typeof(Func<string>)) throw new MissingFieldException("Hands.AlsoCalled");
+            Func<string> was = (Func<string>)field.GetValue(null);
+            Func<string> added = delegate { return (was == null ? "" : was()) + (IsSerious ? Note + (ScreenAsked ? ScreenNote : "") : ""); };
+            field.SetValue(null, added);
+            noteHook = field; noteWas = was; noteMine = added;
+        }
+        catch (Exception error)
+        {
+            capri.Log("Study Buddy couldn't reach her brain's notes (" + error.Message + "), so it's not doing anything");
+            return;
+        }
+        try
+        {
+            FieldInfo field = Hook(hands, "Look");
+            if (field.FieldType != typeof(Func<string, string>)) throw new MissingFieldException("Hands.Look");
+            Func<string, string> was = (Func<string, string>)field.GetValue(null);
+            if (was == null) throw new MissingFieldException("Hands.Look");
+            Func<string, string> added = delegate(string focus) { return was(ScreenAsked ? (focus ?? "") + ReadQuestion : focus); };
+            field.SetValue(null, added);
+            lookHook = field; lookWas = was; lookMine = added;
+        }
+        catch (Exception error) { capri.Log("Study Buddy couldn't reach her eyes (" + error.Message + "), so she won't read questions out word for word"); }
+    }
+
+    private static FieldInfo Hook(Type hands, string name)
+    {
+        FieldInfo field = hands == null ? null : hands.GetField(name, BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+        if (field == null) throw new MissingFieldException("Hands." + name);
+        return field;
+    }
+
+    public bool Heard(string words)
+    {
+        string said = words ?? "";
+        if (StudyOff.IsMatch(said)) { SetStudyMode(false); capri.Say("Study mode off. Back to chaos."); return true; }
+        if (StudyOn.IsMatch(said)) { SetStudyMode(true); capri.Say("Study mode on. Real answers until you say study mode off."); return true; }
+        lock (gate)
+        {
+            DateTime now = Clock();
+            seriousUntil = Serious.IsMatch(said) ? now.AddSeconds(SeriousSeconds) : DateTime.MinValue;
+            bool serious = studyMode || now < seriousUntil;
+            lookUntil = serious && AboutScreen.IsMatch(said) ? now.AddSeconds(LookSeconds) : DateTime.MinValue;
+        }
+        return false;
+    }
+
+    private void SetStudyMode(bool on)
+    {
+        lock (gate) { studyMode = on; seriousUntil = DateTime.MinValue; lookUntil = DateTime.MinValue; }
+        try { if (modeFile != null) File.WriteAllText(modeFile, on ? "on" : "off"); }
+        catch (IOException error) { capri.Log("Study Buddy couldn't save study mode: " + error.Message); }
+    }
+
+    private static void Unwrap(ref FieldInfo hook, Delegate was, ref Delegate mine)
+    {
+        try
+        {
+            if (hook != null && Equals(hook.GetValue(null), mine)) hook.SetValue(null, was);
+        }
+        catch (Exception) { }
+        hook = null;
+        mine = null;
+    }
+
+    public void Stop()
+    {
+        Unwrap(ref noteHook, noteWas, ref noteMine);
+        Unwrap(ref lookHook, lookWas, ref lookMine);
+    }
+}
