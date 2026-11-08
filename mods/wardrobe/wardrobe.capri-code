@@ -1,7 +1,7 @@
 // capri-mod: 1
 // id: wardrobe
 // name: Wardrobe
-// version: 1.3.0
+// version: 1.3.1
 // author: Potato
 // description: Wear several skins at once. "Wear halo" puts Halo on over her skin and colours. "Surprise me" picks a random fit, and "reset your look" starts fresh.
 using System;
@@ -487,7 +487,7 @@ public class Wardrobe : ICapriMod
 
     static string Key(string native, List<string> layers, string[] colours)
     {
-        StringBuilder all = new StringBuilder("recipe" + Recipe);
+        StringBuilder all = new StringBuilder("recipe" + Recipe + "|capri" + typeof(ICapriMod).Assembly.GetName().Version);
         List<string> parts = new List<string>(layers);
         if (native != null) parts.Insert(0, "base:" + native);
         foreach (string part in parts)
