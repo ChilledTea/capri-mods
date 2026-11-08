@@ -10,6 +10,14 @@
       "about": "Roll animated 3D tabletop dice or flip a coin with Capri. Supports D4, D6, D8, D10, D12, D20 and D100 (two percentile dice), with numbered faces, cyberpunk visuals and playful commentary based on the result."
     },
     {
+      "folder": "MK002-Caprichat",
+      "file": "MK002-Caprichat.capri-code",
+      "name": "MK002 Caprichat",
+      "kind": "code",
+      "author": "Mirit0",
+      "about": "A private chat window for Capri"
+    },
+    {
       "folder": "arasaka",
       "file": "arasaka.capri-skin",
       "name": "Arasaka",
@@ -26,6 +34,14 @@
       "about": "Capri as an arctic night: green-to-violet northern lights rippling through night-sky hair, a glacier-ice body, aurora-green panels, polar-night limbs, frost on her edges and snow drifting past."
     },
     {
+      "folder": "auto-game-hologram",
+      "file": "auto-game-hologram.capri-code",
+      "name": "Auto Game Hologram",
+      "kind": "code",
+      "author": "Dominik20074",
+      "about": "![Auto Game Hologram banner](preview.png)"
+    },
+    {
       "folder": "btd6-strategy",
       "file": "btd6-strategy.capri-skill",
       "name": "BTD6 strategy",
@@ -40,6 +56,14 @@
       "kind": "skin",
       "author": "Issei",
       "about": "Capri in a sharp navy business suit."
+    },
+    {
+      "folder": "capri-bezel-led",
+      "file": "capri-bezel-led.capri-code",
+      "name": "Capri Bezel LED",
+      "kind": "code",
+      "author": "Dominik20074",
+      "about": "![Capri Bezel LED preview](preview.png)"
     },
     {
       "folder": "cat-ears",
@@ -242,6 +266,14 @@
       "about": "Say \"holo call\" and she stays on a little call screen in the corner, glitchy face, call-line voice and all, until you say \"hang up\"."
     },
     {
+      "folder": "hologram-speech-glass",
+      "file": "hologram-speech-glass.capri-code",
+      "name": "Hologram Speech Glass",
+      "kind": "code",
+      "author": "Dominik20074",
+      "about": "![Hologram Speech Glass banner](preview.png)"
+    },
+    {
       "folder": "kintsugi-porcelain",
       "file": "kintsugi-porcelain.capri-skin",
       "name": "Kintsugi Porcelain",
@@ -290,6 +322,134 @@
       "about": "Capri in NCPD MaxTac gear, with a dark helmet and green lens clusters for eyes."
     },
     {
+      "folder": "mk002-emoji-activities-01",
+      "file": "MK002-Emoji-activities-01.capri-code",
+      "name": "Emoji Activities 1",
+      "kind": "code",
+      "author": "Mirit0",
+      "about": "Emoji Pack : Activities 1"
+    },
+    {
+      "folder": "mk002-emoji-animals-01",
+      "file": "MK002-Emoji-animals-01.capri-code",
+      "name": "Emoji Animals 1",
+      "kind": "code",
+      "author": "Mirit0",
+      "about": "Emoji Pack : Animals & Nature 1"
+    },
+    {
+      "folder": "mk002-emoji-component-01",
+      "file": "MK002-Emoji-component-01.capri-code",
+      "name": "Emoji Component 1",
+      "kind": "code",
+      "author": "Mirit0",
+      "about": "Emoji Pack : Component 1"
+    },
+    {
+      "folder": "mk002-emoji-flags-01",
+      "file": "MK002-Emoji-flags-01.capri-code",
+      "name": "Emoji Flags 1",
+      "kind": "code",
+      "author": "Mirit0",
+      "about": "Emoji Pack : Flags 1"
+    },
+    {
+      "folder": "mk002-emoji-food-01",
+      "file": "MK002-Emoji-food-01.capri-code",
+      "name": "Emoji Food & Drink 1",
+      "kind": "code",
+      "author": "Mirit0",
+      "about": "Emoji Pack : Food & Drink 1"
+    },
+    {
+      "folder": "mk002-emoji-objects-01",
+      "file": "MK002-Emoji-objects-01.capri-code",
+      "name": "Emoji Objects 1",
+      "kind": "code",
+      "author": "Mirit0",
+      "about": "Emoji Pack : Objects 1"
+    },
+    {
+      "folder": "mk002-emoji-people-01",
+      "file": "MK002-Emoji-people-01.capri-code",
+      "name": "Emoji People & Body 1",
+      "kind": "code",
+      "author": "Mirit0",
+      "about": "Emoji Pack : People & Body 1"
+    },
+    {
+      "folder": "mk002-emoji-people-02",
+      "file": "MK002-Emoji-people-02.capri-code",
+      "name": "Emoji People & Body 2",
+      "kind": "code",
+      "author": "Mirit0",
+      "about": "Emoji Pack : People & Body 2"
+    },
+    {
+      "folder": "mk002-emoji-people-03",
+      "file": "MK002-Emoji-people-03.capri-code",
+      "name": "Emoji People & Body 3",
+      "kind": "code",
+      "author": "Mirit0",
+      "about": "Emoji Pack : People & Body 3"
+    },
+    {
+      "folder": "mk002-emoji-people-04",
+      "file": "MK002-Emoji-people-04.capri-code",
+      "name": "Emoji People & Body 4",
+      "kind": "code",
+      "author": "Mirit0",
+      "about": "Emoji Pack : People & Body 4"
+    },
+    {
+      "folder": "mk002-emoji-people-05",
+      "file": "MK002-Emoji-people-05.capri-code",
+      "name": "Emoji People & Body 5",
+      "kind": "code",
+      "author": "Mirit0",
+      "about": "Emoji Pack : People & Body 5"
+    },
+    {
+      "folder": "mk002-emoji-people-06",
+      "file": "MK002-Emoji-people-06.capri-code",
+      "name": "Emoji People & Body 6",
+      "kind": "code",
+      "author": "Mirit0",
+      "about": "Emoji Pack : People & Body 6"
+    },
+    {
+      "folder": "mk002-emoji-people-07",
+      "file": "MK002-Emoji-people-07.capri-code",
+      "name": "Emoji People & Body 7",
+      "kind": "code",
+      "author": "Mirit0",
+      "about": "Emoji Pack : People & Body 7"
+    },
+    {
+      "folder": "mk002-emoji-people-08",
+      "file": "MK002-Emoji-people-08.capri-code",
+      "name": "Emoji People & Body 8",
+      "kind": "code",
+      "author": "Mirit0",
+      "about": "Emoji Pack : People & Body 8"
+    },
+    {
+      "folder": "mk002-emoji-symbols-01",
+      "file": "MK002-Emoji-symbols-01.capri-code",
+      "name": "Emoji Symbols 1",
+      "kind": "code",
+      "author": "Mirit0",
+      "about": "Emoji Pack : Symbols 1"
+    },
+    {
+      "folder": "mk002-emoji-travel-01",
+      "file": "MK002-Emoji-travel-01.capri-code",
+      "name": "Emoji Travel & Places 1",
+      "kind": "code",
+      "author": "Mirit0",
+      "about": "Emoji Pack : Travel & Places 1"
+    },
+    {
       "folder": "neon-sign",
       "file": "neon-sign.capri-skin",
       "name": "Neon Sign",
@@ -328,6 +488,14 @@
       "kind": "skin",
       "author": "Issei",
       "about": "Capri in cherry blossom, head to toe."
+    },
+    {
+      "folder": "sandevistan",
+      "file": "mirit0-sandevistan.capri-code",
+      "name": "Sandevistan for Capri",
+      "kind": "code",
+      "author": "Mirit0",
+      "about": "Gives Capri a Sandevistan, activates when moving"
     },
     {
       "folder": "santa-hat-black",
@@ -376,6 +544,14 @@
       "kind": "code",
       "author": "Vocyn",
       "about": "Three start-up animations: Hijack, Shatter and Wake. She shuffles them each time she starts, or you pick one."
+    },
+    {
+      "folder": "talia-capri",
+      "file": "talia-capri.capri-skin",
+      "name": "Talia Yang Capri",
+      "kind": "skin",
+      "author": "Dominik20074",
+      "about": "A fan-made skin for [Capri Desktop](https://github.com/lachydotmcg/capri-desktop) that replaces Capri's appearance with Talia Yang from *Cyberpunk: Edgerunners II*."
     },
     {
       "folder": "tell-claude",
