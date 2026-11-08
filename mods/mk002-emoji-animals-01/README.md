@@ -1,9 +1,11 @@
+# Emoji Animals 1
+
 Emoji Pack : Animals & Nature 1
 Adds more emojis to use in Mirit0's Caprichat
 
 * Kind: code
 
-* Made by: Mirit0
+- Made by: Mirit0
 
 160 emojis in this pack:
 

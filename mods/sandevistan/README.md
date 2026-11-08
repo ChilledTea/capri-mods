@@ -12,4 +12,6 @@ Capri leaves a trail of afterimages behind her whenever she moves fast. Drag her
 
 Afterimages use RAM
 
+While it runs, it keeps her window on top and redraws her afterimages on a fast timer.
+
 Tested for windows only.

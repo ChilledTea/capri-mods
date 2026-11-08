@@ -35,3 +35,9 @@ Ask Capri to open her chat ("Caprichat", "open Caprichat", "let's DM", "show our
 
 **Bugs and issues**
 - send an @Mirit0 in "Dopamine Distributors" if you encounter any bugs and issues while using this mod
+
+## What it does in the background
+
+- It asks her brain in the background, even with its window closed, to pick favourites and react to messages.
+- Chats in it are written into her history and daily transcripts, which feed her memories.
+- "Chat with me" and "text me" open its window too.
