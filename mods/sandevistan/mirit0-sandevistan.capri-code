@@ -1,0 +1,1141 @@
+// capri-mod: 1
+// id: mirit0-sandevistan
+// name: Sandevistan for Capri
+// version: 1.5.0
+// author: Mirit0
+// description: Gives Capri a Sandevistan, activates when moving
+
+
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Windows.Forms;
+using CapriDesktop;
+
+internal static class SandevistanSettings
+{
+    // Spawn ONE real afterimage each time Capri travels this many pixels while
+    // dragging or moving above the speed threshold. No synthetic in-between poses.
+    // The distance counter includes small moves across multiple timer ticks.
+    internal const int DistanceBetweenAfterimagesPixels = 50;
+
+    // Check movement every 20 ms. This is a SAMPLE INTERVAL, not a cooldown:
+    // if she travels 50px before the next check, capture on that check.
+    // Fast movement can yield more than 10 real snapshots per second.
+    internal const int MotionPollIntervalMs = 10;
+
+    // Motion activation threshold measured from Capri's actual on-screen path.
+    // Lower = easier to trigger; higher = needs faster movement.
+    internal const double MinimumSpeedPixelsPerSecond = 180.0;
+
+    // Activates when a drag begins, even if dragging slowly below the speed threshold.
+    internal const bool ActivateWhileDragging = true;
+
+    // Detect throws from measured screen motion; optional known position fields are only fallbacks.
+    internal const bool ActivateOnFastThrows = true;
+
+    // Keep active briefly across irregular Capri position updates (avoids flicker).
+    internal const int MotionGraceMs = 180;
+
+    // Each captured afterimage fades out independently over this many milliseconds.
+    // Stopping a drag or throw stops new captures, but never erases existing ghosts.
+    internal const int AfterimageFadeDurationMs = 1800;
+
+    // Fade continues updating smoothly even when Capri is standing still.
+    // 50 ms = about 20 transparency updates per second; lower may use more CPU.
+    internal const int FadeRedrawIntervalMs = 50;
+
+    // Maximum ACTIVE afterimages. Older ones enter a brief fade-out
+    // instead of vanishing the instant this cap is reached.
+    internal const int MaxScreenshots = 40;
+
+    // Ghosts replaced by MaxScreenshots get this additional fade-out time.
+    // Memory remains bounded even when the user throws Capri repeatedly.
+    internal const int CapacityFadeDurationMs = 320;
+    internal const int MaxRetiringGhosts = 40;
+
+    // Complete blue -> purple -> red -> purple -> blue cycle every 100 REAL captures.
+    // The two endpoints transition smoothly without snapping across the cycle boundary.
+    internal const int HueCycleScreenshots = 100;
+    internal const double StartHueDegrees = 215.0;
+    internal const double EndHueDegrees = 360.0;
+
+    // Only the captured ghosts are recolored. Capri herself keeps her real, animated sprite.
+    internal const int NewestOpacityPercent = 75;
+    internal const bool FadeOlderAfterimages = true;
+
+    // Keep the real, normally animated Capri window above other apps.
+    internal const bool KeepCapriAlwaysOnTop = true;
+
+    // A location jump larger than this within one polling tick is a teleport, not a throw.
+    internal const int IgnoreTeleportDistancePixels = 1300;
+
+    // Skip tiny changes in the alpha bounds caused by blinking or pose animation.
+    internal const int MinimumUnanchoredSpriteDisplacementPixels = 18;
+
+    // The frame may be a full transparent canvas. Crop its nontransparent pixels.
+    // 4 = sample alpha on a 4px grid; 1 = scan every pixel (slower).
+    internal const int AlphaSamplingStep = 4;
+
+    // Memory safety limits. All images are in RAM; nothing is saved to disk.
+    internal const int MaxSourcePixels = 2200000;
+    internal const int MaxOverlayPixels = 6000000;
+
+    // Split each monitor into separate small overlay tiles; do not allocate one
+    // bitmap spanning an entire multi-monitor virtual desktop.
+    internal const int MaximumOverlayTileSidePixels = 1536;
+    internal const int MonitorLayoutRefreshMs = 3000;
+}
+
+public sealed class SandevistanAfterimages : ICapriMod
+{
+    private const BindingFlags Members = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+    private readonly object gate = new object();
+    private readonly List<SandevistanGhost> ghosts = new List<SandevistanGhost>();
+    // UI-thread owned: one click-through layered HWND per occupied monitor tile.
+    private readonly Dictionary<Rectangle, SandevistanOverlay> overlays =
+        new Dictionary<Rectangle, SandevistanOverlay>();
+    private Rectangle[] monitorTiles = new Rectangle[0];
+    private long lastMonitorRefreshTimestamp;
+    // UI-thread-owned travel accumulator. Each measured movement delta is added
+    // once; after a real capture we keep only the remainder (< 50px by default).
+    // Reset between separate drags/throws so trails never bridge stationary time.
+    private double distanceSinceLastAfterimage;
+    private ICapriHost host;
+    private Form capri;
+    private FieldInfo frameMember, hiddenMember, dockedMember;
+    private System.Windows.Forms.Timer clock;
+    private bool wasTopMost, savedTopMost, started, moving, dragFromEvent, mouseDownOnCapri;
+    private Point previousPosition, previousWindowPosition, mouseStart, lastWorldAnchor;
+    private Point previousVisualOffset, previousWindowPositionAtLastTick;
+    private FieldInfo worldXField, worldYField;
+    private double lastWorldX, lastWorldY;
+    private bool worldInitialized;
+    private byte[] alphaPixels;
+    private bool hasMotionSample, worldMotionThisTick;
+    private long previousTimestamp, lastFastTimestamp, lastRenderTimestamp;
+    private int capturedCount, generation, busy;
+    private volatile bool stopped;
+
+    [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int vKey);
+    [StructLayout(LayoutKind.Sequential)] private struct NativeRect { internal int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hwnd, out NativeRect rect);
+    private const int VK_LBUTTON = 0x01;
+
+    public void Start(ICapriHost provided)
+    {
+        host = provided;
+        stopped = false;
+        started = false;
+        moving = false;
+        capturedCount = 0;
+        distanceSinceLastAfterimage = 0;
+        lastRenderTimestamp = 0;
+        Interlocked.Increment(ref generation);
+        Interlocked.Exchange(ref busy, 0);
+        object companion = null;
+        try
+        {
+            FieldInfo f = provided.GetType().GetField("capri", Members);
+            if (f != null) companion = f.GetValue(provided);
+        }
+        catch (Exception error) { Log("Host lookup: " + error.Message); }
+        capri = companion as Form;
+        if (capri == null)
+        {
+            try
+            {
+                foreach (Form open in Application.OpenForms)
+                {
+                    if (open.GetType().FullName == "CapriDesktop.Companion")
+                    { capri = open; break; }
+                }
+            }
+            catch (Exception) { }
+        }
+        if (capri == null)
+        {
+            Log("Companion form unavailable. Effect disabled; no other windows changed.");
+            return;
+        }
+        frameMember = capri.GetType().GetField("frame", Members);
+        hiddenMember = capri.GetType().GetField("hidden", Members);
+        dockedMember = capri.GetType().GetField("docked", Members);
+        // Optional private, numeric position fields: version-dependent and validated at runtime.
+        worldXField = FindNumericField("x", "posX", "spriteX", "petX", "cx");
+        worldYField = FindNumericField("y", "posY", "spriteY", "petY", "cy");
+        if (frameMember == null || !typeof(Bitmap).IsAssignableFrom(frameMember.FieldType))
+        {
+            Log("This Capri build has no compatible transparent frame bitmap. Effect disabled.");
+            return;
+        }
+        int run = generation;
+        OnCapriThread(delegate { if (!stopped && run == generation) Enable(); });
+    }
+
+    private void Enable()
+    {
+        if (started || stopped || capri == null || capri.IsDisposed || !capri.IsHandleCreated) return;
+        savedTopMost = true;
+        wasTopMost = capri.TopMost;
+        if (SandevistanSettings.KeepCapriAlwaysOnTop) capri.TopMost = true;
+        lastMonitorRefreshTimestamp = 0;
+        RefreshMonitorTiles(Stopwatch.GetTimestamp());
+        capri.MouseDown += CapriMouseDown;
+        capri.MouseMove += CapriMouseMove;
+        capri.MouseUp += CapriMouseUp;
+        capri.MouseCaptureChanged += CapriMouseCaptureChanged;
+        previousWindowPosition = GetActualWindowPosition();
+        previousWindowPositionAtLastTick = previousWindowPosition;
+        previousPosition = previousWindowPosition;
+        previousVisualOffset = Point.Empty;
+        lastWorldAnchor = previousWindowPosition;
+        worldInitialized = false;
+        hasMotionSample = false;
+        distanceSinceLastAfterimage = 0;
+        previousTimestamp = Stopwatch.GetTimestamp();
+        lastFastTimestamp = 0;
+        lastRenderTimestamp = 0;
+        mouseDownOnCapri = false;
+        dragFromEvent = false;
+        clock = new System.Windows.Forms.Timer();
+        clock.Interval = Math.Max(15, SandevistanSettings.MotionPollIntervalMs);
+        clock.Tick += Tick;
+        started = true;
+        clock.Start();
+        Log("1.5.0 ready: one real snapshot per " +
+            Math.Max(1, SandevistanSettings.DistanceBetweenAfterimagesPixels) +
+            "px traveled (no interpolation); motion checked every " +
+            Math.Max(15, SandevistanSettings.MotionPollIntervalMs) +
+            "ms; animated sprite untouched; throw threshold " +
+            SandevistanSettings.MinimumSpeedPixelsPerSecond + " px/s.");
+    }
+
+    public bool Heard(string words) { return false; }
+
+    private void CapriMouseDown(object sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left) return;
+        mouseDownOnCapri = true;
+        dragFromEvent = false;
+        mouseStart = Cursor.Position;
+    }
+    private void CapriMouseMove(object sender, MouseEventArgs e)
+    {
+        if (!mouseDownOnCapri || (Control.MouseButtons & MouseButtons.Left) == 0) return;
+        Point cursor = Cursor.Position;
+        if (Distance(cursor, mouseStart) >= 4.0) dragFromEvent = true;
+    }
+    private void CapriMouseUp(object sender, MouseEventArgs e)
+    {
+        if (e.Button == MouseButtons.Left) { mouseDownOnCapri = false; dragFromEvent = false; }
+    }
+    private void CapriMouseCaptureChanged(object sender, EventArgs e)
+    {
+        if ((Control.MouseButtons & MouseButtons.Left) == 0)
+        { mouseDownOnCapri = false; dragFromEvent = false; }
+    }
+
+    private static double Distance(Point a, Point b)
+    {
+        double dx = (double)a.X - b.X, dy = (double)a.Y - b.Y;
+        return Math.Sqrt(dx * dx + dy * dy);
+    }
+    private static double Milliseconds(long a, long b)
+    {
+        return (b - a) * 1000.0 / Stopwatch.Frequency;
+    }
+    private bool Flag(FieldInfo field)
+    {
+        try { return field != null && field.FieldType == typeof(bool) && (bool)field.GetValue(capri); }
+        catch (Exception) { return false; }
+    }
+
+    // Capri may reposition its HWND using native APIs while its WinForms Location
+    // property remains unchanged. GetWindowRect is the authoritative screen origin.
+    private Point GetActualWindowPosition()
+    {
+        NativeRect r;
+        try { if (capri != null && capri.IsHandleCreated && GetWindowRect(capri.Handle, out r))
+            return new Point(r.Left, r.Top); }
+        catch (Exception) { }
+        return capri == null ? Point.Empty : capri.Location;
+    }
+
+    private FieldInfo FindNumericField(params string[] names)
+    {
+        if (capri == null) return null;
+        foreach (string name in names)
+        {
+            FieldInfo f = capri.GetType().GetField(name, Members);
+            if (f != null && (f.FieldType == typeof(int) || f.FieldType == typeof(float) ||
+                f.FieldType == typeof(double))) return f;
+        }
+        return null;
+    }
+    private bool ReadWorld(out double x, out double y)
+    {
+        x = y = 0;
+        if (worldXField == null || worldYField == null) return false;
+        try
+        {
+            x = Convert.ToDouble(worldXField.GetValue(capri));
+            y = Convert.ToDouble(worldYField.GetValue(capri));
+            return !Double.IsNaN(x) && !Double.IsNaN(y) &&
+                !Double.IsInfinity(x) && !Double.IsInfinity(y) &&
+                Math.Abs(x) < 1000000 && Math.Abs(y) < 1000000;
+        }
+        catch (Exception) { return false; }
+    }
+
+    // Read only alpha. This does not alter the frame or pause Capri's animation.
+    // The sampled bounds resolve movement *within* a stationary form, and remove
+    // transparent margins so we don't process a full desktop-sized bitmap.
+    private Rectangle GetVisibleSpriteBounds(Bitmap frame)
+    {
+        if (frame == null) return Rectangle.Empty;
+        BitmapData data = null;
+        try
+        {
+            Rectangle full = new Rectangle(0, 0, frame.Width, frame.Height);
+            data = frame.LockBits(full, ImageLockMode.ReadOnly, PixelFormat.Format32bppPArgb);
+            int pitch = Math.Abs(data.Stride);
+            int length = checked(pitch * frame.Height);
+            if (alphaPixels == null || alphaPixels.Length < length) alphaPixels = new byte[length];
+            IntPtr first = data.Stride < 0 ? IntPtr.Add(data.Scan0, data.Stride * (frame.Height - 1)) : data.Scan0;
+            Marshal.Copy(first, alphaPixels, 0, length);
+            int left = frame.Width, top = frame.Height, right = -1, bottom = -1;
+            int step = Math.Max(1, SandevistanSettings.AlphaSamplingStep);
+            for (int y = 0; y < frame.Height; y += step)
+            {
+                int row = (data.Stride < 0 ? frame.Height - 1 - y : y) * pitch;
+                for (int x = 0; x < frame.Width; x += step)
+                {
+                    if (alphaPixels[row + x * 4 + 3] < 12) continue;
+                    if (x < left) left = x;
+                    if (x > right) right = x;
+                    if (y < top) top = y;
+                    if (y > bottom) bottom = y;
+                }
+            }
+            if (right < left || bottom < top) return Rectangle.Empty;
+            int pad = step + 2;
+            left = Math.Max(0, left - pad); top = Math.Max(0, top - pad);
+            right = Math.Min(frame.Width - 1, right + pad);
+            bottom = Math.Min(frame.Height - 1, bottom + pad);
+            return Rectangle.FromLTRB(left, top, right + 1, bottom + 1);
+        }
+        catch (Exception) { return new Rectangle(0, 0, frame.Width, frame.Height); }
+        finally { if (data != null) frame.UnlockBits(data); }
+    }
+
+    // Use HWND movement, an internal world coordinate (if present), or the
+    // position of the visible alpha sprite inside the frame.  Whichever actually
+    // travels is used, rather than pinning every rotated pose at the throw origin.
+    private Point LocateSprite(Point windowAt, Rectangle visible)
+    {
+        Point offset = visible.IsEmpty ? Point.Empty : visible.Location;
+        Point result = new Point(windowAt.X + offset.X, windowAt.Y + offset.Y);
+        double x, y;
+        worldMotionThisTick = false;
+        if (ReadWorld(out x, out y))
+        {
+            if (!worldInitialized)
+            {
+                lastWorldX = x; lastWorldY = y;
+                lastWorldAnchor = windowAt;
+                worldInitialized = true;
+            }
+            bool windowStayed = Distance(windowAt, previousWindowPosition) <= 2;
+            bool imageStayed = Distance(offset, previousVisualOffset) <
+                SandevistanSettings.MinimumUnanchoredSpriteDisplacementPixels;
+            double wx = x - lastWorldX, wy = y - lastWorldY;
+            if (windowStayed && imageStayed && Math.Abs(wx) < 10000 && Math.Abs(wy) < 10000)
+            {
+                worldMotionThisTick = Math.Abs(wx) + Math.Abs(wy) >= 1.0;
+                lastWorldAnchor = new Point(lastWorldAnchor.X + (int)Math.Round(wx),
+                    lastWorldAnchor.Y + (int)Math.Round(wy));
+                result = new Point(lastWorldAnchor.X + offset.X, lastWorldAnchor.Y + offset.Y);
+            }
+            else lastWorldAnchor = windowAt;
+            lastWorldX = x; lastWorldY = y;
+        }
+        previousVisualOffset = offset;
+        previousWindowPosition = windowAt;
+        return result;
+    }
+
+    private bool CurrentlyDragging(Point current, double pathDistance)
+    {
+        if (!SandevistanSettings.ActivateWhileDragging) return false;
+        bool down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+        if (!down)
+        {
+            mouseDownOnCapri = false;
+            dragFromEvent = false;
+            return false;
+        }
+        // Native Capri may move the body through WndProc rather than MouseMove.
+        // Mouse capture or a gesture that began on Capri is a safer discriminator
+        // than treating every desktop left-button drag as Capri being dragged.
+        bool owned = dragFromEvent || (mouseDownOnCapri &&
+            (Distance(Cursor.Position, mouseStart) > 3 || pathDistance > 2));
+        if (!owned && capri.Capture && pathDistance > 2) owned = true;
+        return owned;
+    }
+
+    // Snapshot the current monitor layout on the WinForms UI thread only.
+    // Per-monitor tiles naturally handle negative origins and different layouts.
+    // The worker reads an immutable copy of this array.
+    private void RefreshMonitorTiles(long now)
+    {
+        if (lastMonitorRefreshTimestamp != 0 &&
+            Milliseconds(lastMonitorRefreshTimestamp, now) <
+                Math.Max(250, SandevistanSettings.MonitorLayoutRefreshMs)) return;
+        lastMonitorRefreshTimestamp = now;
+        List<Rectangle> updated = new List<Rectangle>();
+        int maxSide = Math.Max(256, Math.Min(2048,
+            SandevistanSettings.MaximumOverlayTileSidePixels));
+        maxSide = Math.Min(maxSide, (int)Math.Sqrt(Math.Max(65536,
+            SandevistanSettings.MaxOverlayPixels)));
+        try
+        {
+            foreach (Screen monitor in Screen.AllScreens)
+            {
+                Rectangle screen = monitor.Bounds; // physical screen coordinates
+                for (int y = screen.Top; y < screen.Bottom; y += maxSide)
+                    for (int x = screen.Left; x < screen.Right; x += maxSide)
+                        updated.Add(new Rectangle(x, y,
+                            Math.Min(maxSide, screen.Right - x),
+                            Math.Min(maxSide, screen.Bottom - y)));
+            }
+        }
+        catch (Exception error) { Log("Display layout: " + error.Message); }
+        // Keep the previous layout if an automatic topology refresh fails.
+        if (updated.Count > 0)
+        {
+            monitorTiles = updated.ToArray();
+            HashSet<Rectangle> valid = new HashSet<Rectangle>(updated);
+            List<Rectangle> obsolete = new List<Rectangle>();
+            foreach (KeyValuePair<Rectangle, SandevistanOverlay> layer in overlays)
+                if (!valid.Contains(layer.Key))
+                {
+                    if (!layer.Value.IsDisposed) { layer.Value.Close(); layer.Value.Dispose(); }
+                    obsolete.Add(layer.Key);
+                }
+            foreach (Rectangle key in obsolete) overlays.Remove(key);
+        }
+    }
+
+    private void Tick(object sender, EventArgs args)
+    {
+        if (stopped || capri == null || capri.IsDisposed) return;
+        try
+        {
+            if (SandevistanSettings.KeepCapriAlwaysOnTop && !capri.TopMost) capri.TopMost = true;
+            long now = Stopwatch.GetTimestamp();
+            RefreshMonitorTiles(now);
+            if (!capri.Visible || capri.WindowState == FormWindowState.Minimized ||
+                Flag(hiddenMember) || Flag(dockedMember))
+            {
+                Deactivate();
+                return;
+            }
+            Point windowAt = GetActualWindowPosition();
+            Bitmap currentFrame = frameMember.GetValue(capri) as Bitmap;
+            if (currentFrame == null || currentFrame.Width <= 0 || currentFrame.Height <= 0 ||
+                (long)currentFrame.Width * currentFrame.Height > SandevistanSettings.MaxSourcePixels)
+            { Deactivate(); return; }
+            Rectangle visible = GetVisibleSpriteBounds(currentFrame);
+            if (visible.IsEmpty) { Deactivate(); return; }
+            Point current = LocateSprite(windowAt, visible);
+            if (!hasMotionSample)
+            {
+                previousPosition = current;
+                previousWindowPositionAtLastTick = windowAt;
+                previousTimestamp = now;
+                hasMotionSample = true;
+                return;
+            }
+            double pathDistance = Distance(previousPosition, current);
+            double dt = Math.Max(1.0, Milliseconds(previousTimestamp, now));
+            bool movedWindow = Distance(previousWindowPositionAtLastTick, windowAt) > 1;
+            previousWindowPositionAtLastTick = windowAt;
+            previousPosition = current;
+            previousTimestamp = now;
+
+            // A teleport or monitor change is not a physical trail. Existing ghosts
+            // should not form a line across the desktop when Capri warps.
+            if (pathDistance > SandevistanSettings.IgnoreTeleportDistancePixels)
+            {
+                Deactivate();
+                lastFastTimestamp = 0;
+                return;
+            }
+            double speed = pathDistance * 1000.0 / dt;
+            bool drag = CurrentlyDragging(current, pathDistance);
+            // A rotating/idle pose can move its alpha-bound origin slightly. If
+            // neither the actual window nor body coordinates are translating,
+            // suppress such false movement triggers.
+            bool meaningfulMotion = movedWindow || worldMotionThisTick ||
+                pathDistance >= SandevistanSettings.MinimumUnanchoredSpriteDisplacementPixels;
+            bool fast = SandevistanSettings.ActivateOnFastThrows && meaningfulMotion &&
+                speed >= Math.Max(1.0, SandevistanSettings.MinimumSpeedPixelsPerSecond);
+            bool captureMotion = fast || drag;
+            if (captureMotion) lastFastTimestamp = now;
+            bool active = captureMotion || (lastFastTimestamp != 0 &&
+                Milliseconds(lastFastTimestamp, now) <= Math.Max(0, SandevistanSettings.MotionGraceMs));
+            // Motion only controls creation. Already-captured afterimages have their
+            // own lifetime and must keep fading after the mouse is released.
+            if (!active)
+            {
+                if (moving)
+                {
+                    moving = false;
+                    // Never bridge a stopped movement to the next independent drag.
+                    distanceSinceLastAfterimage = 0;
+                }
+                lastFastTimestamp = 0;
+            }
+            else if (!moving)
+            {
+                moving = true;
+                distanceSinceLastAfterimage = 0; // Start measuring this gesture.
+            }
+
+            // The real Capri is never covered or recolored. Let the host animate
+            // normally; only the older, click-through ghosts are rendered behind.
+            foreach (SandevistanOverlay layer in overlays.Values)
+                if (!layer.IsDisposed && layer.Visible) layer.KeepBehind(capri.Handle);
+
+            // Existing ghosts ALWAYS fade independently after movement ends.
+            // Only measured travel while the user drags or Capri moves quickly
+            // contributes to a new snapshot. No 100ms timer, interpolated poses,
+            // or copies inserted at unobserved screen positions.
+            if (!captureMotion || !meaningfulMotion || pathDistance < 0.1)
+            {
+                QueueFadeRedraw(now);
+                return;
+            }
+            double spacing = Math.Max(1.0, SandevistanSettings.DistanceBetweenAfterimagesPixels);
+            distanceSinceLastAfterimage += pathDistance;
+            if (distanceSinceLastAfterimage < spacing)
+            {
+                QueueFadeRedraw(now);
+                return;
+            }
+            // When one timer sample jumps several spacings, take ONE image at
+            // Capri's real sampled position. Additional copies would be fabricated
+            // interpolation, not actual sprite poses. Retain the fractional travel
+            // remainder only so sampling does not drift over a long drag.
+            if (Interlocked.CompareExchange(ref busy, 1, 0) != 0) return;
+            Bitmap copied = null;
+            bool workerQueued = false;
+            try
+            {
+                // Clone the *current* animated pose, not the previous pose or a
+                // screen capture. Cropping also prevents full-screen allocations.
+                copied = currentFrame.Clone(visible, PixelFormat.Format32bppPArgb);
+                lastRenderTimestamp = now;
+                int ordinal = capturedCount++;
+                int run = generation;
+                Point capturedPosition = current; // Exact position sampled with the pose.
+                Bitmap work = copied;
+                copied = null; // Worker owns it now.
+                long capturedAt = now;
+                try { workerQueued = ThreadPool.QueueUserWorkItem(delegate { Build(work, capturedPosition, ordinal, capturedAt, run); }); }
+                catch { work.Dispose(); throw; }
+                if (!workerQueued) work.Dispose();
+                else distanceSinceLastAfterimage %= spacing;
+                return; // Worker releases busy only if successfully queued.
+            }
+            catch (Exception error) { Log("Capture: " + error.Message); }
+            finally
+            {
+                if (copied != null) copied.Dispose();
+                if (!workerQueued) Interlocked.Exchange(ref busy, 0);
+            }
+        }
+        catch (Exception error) { Log("Motion tracking: " + error.Message); }
+    }
+
+    // Compositing is queued on a worker; the UI timer never repaints a full trail.
+    // It continues repainting at low cadence while still afterimages remain, even
+    // if no new snapshot is taken after the user's drag/throw ends.
+    private void QueueFadeRedraw(long now)
+    {
+        if (lastRenderTimestamp != 0 && Milliseconds(lastRenderTimestamp, now) <
+            Math.Max(25, SandevistanSettings.FadeRedrawIntervalMs)) return;
+        lock (gate) { if (ghosts.Count == 0) return; }
+        if (Interlocked.CompareExchange(ref busy, 1, 0) != 0) return;
+        lastRenderTimestamp = now;
+        int run = generation;
+        bool queued = false;
+        try { queued = ThreadPool.QueueUserWorkItem(delegate { RenderGhosts(run); }); }
+        catch (Exception error) { Log("Fade redraw: " + error.Message); }
+        finally { if (!queued) Interlocked.Exchange(ref busy, 0); }
+    }
+
+    // ONE new, live pose captured at the actual sampled location, each time the
+    // accumulated real travel reaches DistanceBetweenAfterimagesPixels.
+    // There are no invented positions, blended frames or extra placements.
+    private void Build(Bitmap source, Point at, int number, long capturedAt, int run)
+    {
+        Bitmap colorized = null;
+        bool rendering = false;
+        try
+        {
+            if (stopped || run != generation) return;
+            int period = Math.Max(2, SandevistanSettings.HueCycleScreenshots);
+            double phase = (number % period) / (double)period;
+            double sweep = 0.5 - 0.5 * Math.Cos(2.0 * Math.PI * phase);
+            double hue = SandevistanSettings.StartHueDegrees +
+                (SandevistanSettings.EndHueDegrees - SandevistanSettings.StartHueDegrees) * sweep;
+            colorized = Colorize(source, hue);
+            if (colorized == null) return;
+            lock (gate)
+            {
+                if (stopped || run != generation) return;
+                SandevistanFrame frame = new SandevistanFrame(colorized);
+                colorized = null;
+                try
+                {
+                    frame.AddRef(); // The one ghost owns the captured bitmap.
+                    ghosts.Add(new SandevistanGhost(frame, at, capturedAt));
+                    RetireOverflowUnderLock(capturedAt);
+                }
+                finally
+                {
+                    frame.DisposeIfUnreferenced();
+                }
+            }
+            rendering = true;
+            RenderGhosts(run);
+        }
+        catch (Exception error) { Log("Color processing: " + error.Message); }
+        finally
+        {
+            source.Dispose();
+            if (colorized != null) colorized.Dispose();
+            if (!rendering) Interlocked.Exchange(ref busy, 0);
+        }
+    }
+
+    private void RetireOverflowUnderLock(long now)
+    {
+        int maxActive = Math.Max(1, Math.Min(100, SandevistanSettings.MaxScreenshots));
+        int activeCount = 0;
+        foreach (SandevistanGhost ghost in ghosts)
+            if (ghost.RetiredAt == 0) activeCount++;
+        // The oldest ACTIVE ghosts fade out in a small retiring buffer, rather
+        // than being disposed instantly and visibly popping from the screen.
+        for (int i = 0; i < ghosts.Count && activeCount > maxActive; i++)
+        {
+            if (ghosts[i].RetiredAt != 0) continue;
+            ghosts[i].RetiredAt = now;
+            activeCount--;
+        }
+        int maxRetiring = Math.Max(0, Math.Min(150,
+            SandevistanSettings.MaxRetiringGhosts));
+        int retiring = 0;
+        foreach (SandevistanGhost ghost in ghosts)
+            if (ghost.RetiredAt != 0) retiring++;
+        for (int i = 0; i < ghosts.Count && retiring > maxRetiring; )
+        {
+            if (ghosts[i].RetiredAt == 0) { i++; continue; }
+            ghosts[i].Release();
+            ghosts.RemoveAt(i);
+            retiring--;
+        }
+    }
+
+    // Paint only occupied tiles. Each monitor is clipped independently; a
+    // sprite spanning a display seam renders in both tiles at the right coords.
+    private void RenderGhosts(int run)
+    {
+        List<SandevistanComposition> output = new List<SandevistanComposition>();
+        bool posted = false;
+        try
+        {
+            if (stopped || run != generation) return;
+            long now = Stopwatch.GetTimestamp();
+            Rectangle[] regions = monitorTiles;
+            lock (gate)
+            {
+                if (stopped || run != generation) return;
+                int fadeMs = Math.Max(100, SandevistanSettings.AfterimageFadeDurationMs);
+                int capacityMs = Math.Max(50, SandevistanSettings.CapacityFadeDurationMs);
+                for (int i = ghosts.Count - 1; i >= 0; i--)
+                {
+                    SandevistanGhost ghost = ghosts[i];
+                    if (Milliseconds(ghost.CapturedAt, now) < fadeMs &&
+                        (ghost.RetiredAt == 0 || Milliseconds(ghost.RetiredAt, now) < capacityMs)) continue;
+                    ghost.Release();
+                    ghosts.RemoveAt(i);
+                }
+                if (ghosts.Count != 0)
+                    foreach (Rectangle tile in regions)
+                    {
+                        Point at;
+                        Bitmap canvas = Compose(ghosts, tile, now, out at);
+                        if (canvas != null) output.Add(new SandevistanComposition(tile, canvas, at));
+                    }
+            }
+            posted = Post(delegate
+            {
+                try
+                {
+                    if (stopped || run != generation || capri == null || capri.IsDisposed ||
+                        !capri.Visible || Flag(hiddenMember) || Flag(dockedMember)) return;
+                    HashSet<Rectangle> used = new HashSet<Rectangle>();
+                    foreach (SandevistanComposition item in output)
+                    {
+                        used.Add(item.Tile);
+                        SandevistanOverlay layer;
+                        if (!overlays.TryGetValue(item.Tile, out layer) || layer.IsDisposed)
+                        {
+                            layer = new SandevistanOverlay();
+                            overlays[item.Tile] = layer;
+                        }
+                        try { layer.Present(item.Image, item.At, capri.Handle); }
+                        catch (Exception error) { Log("Layered tile: " + error.Message); layer.Hide(); }
+                    }
+                    foreach (KeyValuePair<Rectangle, SandevistanOverlay> entry in overlays)
+                        if (!used.Contains(entry.Key) && !entry.Value.IsDisposed) entry.Value.Hide();
+                }
+                finally
+                {
+                    foreach (SandevistanComposition item in output) item.Image.Dispose();
+                    Interlocked.Exchange(ref busy, 0);
+                }
+            });
+        }
+        catch (Exception error) { Log("Fade composition: " + error.Message); }
+        finally
+        {
+            if (!posted)
+            {
+                foreach (SandevistanComposition item in output) item.Image.Dispose();
+                Interlocked.Exchange(ref busy, 0);
+            }
+        }
+    }
+
+    private static Bitmap Colorize(Bitmap source, double targetHue)
+    {
+        int w = source.Width, h = source.Height;
+        Rectangle full = new Rectangle(0, 0, w, h);
+        Bitmap target = new Bitmap(w, h, PixelFormat.Format32bppPArgb);
+        BitmapData input = null, output = null;
+        bool okay = false;
+        try
+        {
+            input = source.LockBits(full, ImageLockMode.ReadOnly, PixelFormat.Format32bppPArgb);
+            output = target.LockBits(full, ImageLockMode.WriteOnly, PixelFormat.Format32bppPArgb);
+            int inputStride = Math.Abs(input.Stride), outputStride = Math.Abs(output.Stride);
+            byte[] before = new byte[inputStride * h];
+            byte[] after = new byte[outputStride * h];
+            IntPtr from = input.Stride < 0 ? IntPtr.Add(input.Scan0, input.Stride * (h - 1)) : input.Scan0;
+            IntPtr to = output.Stride < 0 ? IntPtr.Add(output.Scan0, output.Stride * (h - 1)) : output.Scan0;
+            Marshal.Copy(from, before, 0, before.Length);
+            Color tint = FromHue(targetHue);
+            double b = tint.B / 255.0, g = tint.G / 255.0, r = tint.R / 255.0;
+            for (int y = 0; y < h; y++)
+            {
+                int src = (input.Stride < 0 ? h - 1 - y : y) * inputStride;
+                int dst = (output.Stride < 0 ? h - 1 - y : y) * outputStride;
+                for (int x = 0; x < w; x++, src += 4, dst += 4)
+                {
+                    int a = before[src + 3];
+                    if (a == 0) continue;
+                    // Recover brightness from premultiplied source while keeping alpha.
+                    double brightness = (before[src + 2] * 0.299 + before[src + 1] * 0.587 +
+                        before[src] * 0.114) / a;
+                    double light = Math.Min(1.0, 0.26 + Math.Pow(brightness, 0.8) * 0.86);
+                    double power = a * light;
+                    after[dst] = (byte)Math.Min(255, Math.Round(b * power));
+                    after[dst + 1] = (byte)Math.Min(255, Math.Round(g * power));
+                    after[dst + 2] = (byte)Math.Min(255, Math.Round(r * power));
+                    after[dst + 3] = (byte)a;
+                }
+            }
+            Marshal.Copy(after, 0, to, after.Length);
+            okay = true;
+            return target;
+        }
+        finally
+        {
+            if (output != null) target.UnlockBits(output);
+            if (input != null) source.UnlockBits(input);
+            if (!okay) target.Dispose();
+        }
+    }
+
+    private static Color FromHue(double degrees)
+    {
+        double hue = ((degrees % 360.0) + 360.0) % 360.0;
+        double x = 1.0 - Math.Abs((hue / 60.0) % 2.0 - 1.0);
+        double r = 0, g = 0, b = 0;
+        if (hue < 60) { r = 1; g = x; }
+        else if (hue < 120) { r = x; g = 1; }
+        else if (hue < 180) { g = 1; b = x; }
+        else if (hue < 240) { g = x; b = 1; }
+        else if (hue < 300) { r = x; b = 1; }
+        else { r = 1; b = x; }
+        return Color.FromArgb((int)Math.Round(255 * (0.08 + 0.92 * r)),
+            (int)Math.Round(255 * (0.08 + 0.92 * g)),
+            (int)Math.Round(255 * (0.08 + 0.92 * b)));
+    }
+
+    private static Bitmap Compose(List<SandevistanGhost> frames, Rectangle tile, long now, out Point at)
+    {
+        at = Point.Empty;
+        Rectangle box = Rectangle.Empty;
+        foreach (SandevistanGhost ghost in frames)
+        {
+            Rectangle clipped = Rectangle.Intersect(tile,
+                new Rectangle(ghost.At, ghost.Frame.Image.Size));
+            if (!clipped.IsEmpty) box = box.IsEmpty ? clipped : Rectangle.Union(box, clipped);
+        }
+        if (box.IsEmpty || box.Width <= 0 || box.Height <= 0) return null;
+        // Tile sizing guarantees no unbounded virtual-desktop allocation.
+        if ((long)box.Width * box.Height > SandevistanSettings.MaxOverlayPixels) return null;
+        at = box.Location;
+        Bitmap composed = new Bitmap(box.Width, box.Height, PixelFormat.Format32bppPArgb);
+        try
+        {
+            using (Graphics graphics = Graphics.FromImage(composed))
+            {
+                graphics.Clear(Color.Transparent);
+                graphics.CompositingMode = CompositingMode.SourceOver;
+                graphics.InterpolationMode = InterpolationMode.NearestNeighbor;
+                for (int i = 0; i < frames.Count; i++)
+                {
+                    SandevistanGhost ghost = frames[i];
+                    Bitmap image = ghost.Frame.Image;
+                    Rectangle rect = new Rectangle(ghost.At, image.Size);
+                    if (!box.IntersectsWith(rect)) continue;
+                    double age = Math.Max(0, Milliseconds(ghost.CapturedAt, now));
+                    double t = Math.Min(1.0, age /
+                        Math.Max(100, SandevistanSettings.AfterimageFadeDurationMs));
+                    // Smoothstep, derivative zero at both ends. Old ghosts keep
+                    // fading after all motion/captures have ended.
+                    double opacity = 1.0 - t * t * (3.0 - 2.0 * t);
+                    if (SandevistanSettings.FadeOlderAfterimages)
+                        opacity *= Math.Pow(1.0 - t, 0.55);
+                    if (ghost.RetiredAt != 0)
+                    {
+                        double retired = Math.Max(0, Milliseconds(ghost.RetiredAt, now));
+                        double q = Math.Min(1.0, retired /
+                            Math.Max(50, SandevistanSettings.CapacityFadeDurationMs));
+                        opacity *= 1.0 - q * q * (3.0 - 2.0 * q);
+                    }
+                    float alpha = (float)(Math.Max(0,
+                        Math.Min(100, SandevistanSettings.NewestOpacityPercent)) / 100.0 * opacity);
+                    if (alpha <= 0.001f) continue;
+                    using (ImageAttributes attr = new ImageAttributes())
+                    {
+                        ColorMatrix cm = new ColorMatrix();
+                        cm.Matrix33 = alpha;
+                        attr.SetColorMatrix(cm);
+                        graphics.DrawImage(image,
+                            new Rectangle(ghost.At.X - box.X, ghost.At.Y - box.Y,
+                                image.Width, image.Height),
+                            0, 0, image.Width, image.Height, GraphicsUnit.Pixel, attr);
+                    }
+                }
+            }
+            return composed;
+        }
+        catch { composed.Dispose(); throw; }
+    }
+
+    private bool Post(Action action)
+    {
+        try
+        {
+            if (stopped || capri == null || capri.IsDisposed || !capri.IsHandleCreated) return false;
+            capri.BeginInvoke(action);
+            return true;
+        }
+        catch (Exception) { return false; }
+    }
+    private void OnCapriThread(Action action)
+    {
+        try
+        {
+            if (capri == null || capri.IsDisposed || !capri.IsHandleCreated) return;
+            if (capri.InvokeRequired) capri.BeginInvoke(action); else action();
+        }
+        catch (Exception error) { Log("UI setup: " + error.Message); }
+    }
+    private void Deactivate()
+    {
+        moving = false;
+        lastFastTimestamp = 0;
+        distanceSinceLastAfterimage = 0;
+        lastRenderTimestamp = 0;
+        hasMotionSample = false; // do not bridge offscreen / monitor topology changes
+        Interlocked.Increment(ref generation);
+        foreach (SandevistanOverlay layer in overlays.Values)
+            if (!layer.IsDisposed) layer.Hide();
+        lock (gate)
+        {
+            foreach (SandevistanGhost ghost in ghosts) ghost.Release();
+            ghosts.Clear();
+        }
+    }
+
+    public void Stop()
+    {
+        stopped = true;
+        Interlocked.Increment(ref generation);
+        Form target = capri;
+        System.Windows.Forms.Timer oldClock = clock;
+        clock = null;
+        Action cleanup = delegate
+        {
+            if (oldClock != null) { oldClock.Stop(); oldClock.Tick -= Tick; oldClock.Dispose(); }
+            if (target != null && !target.IsDisposed)
+            {
+                target.MouseDown -= CapriMouseDown;
+                target.MouseMove -= CapriMouseMove;
+                target.MouseUp -= CapriMouseUp;
+                target.MouseCaptureChanged -= CapriMouseCaptureChanged;
+            }
+            foreach (SandevistanOverlay layer in overlays.Values)
+            {
+                if (!layer.IsDisposed) { layer.Close(); layer.Dispose(); }
+            }
+            overlays.Clear();
+            if (savedTopMost && target != null && !target.IsDisposed && SandevistanSettings.KeepCapriAlwaysOnTop)
+                target.TopMost = wasTopMost;
+            savedTopMost = false;
+            started = false;
+        };
+        if (target != null && !target.IsDisposed && target.IsHandleCreated)
+        {
+            try { if (target.InvokeRequired) target.BeginInvoke(cleanup); else cleanup(); }
+            catch (Exception) { /* Capri is already closing. */ }
+        }
+        else
+        {
+            // A closing host has no UI handle to post to. Dispose the timer
+            // and nonvisible resources without waiting for a callback.
+            if (oldClock != null) { oldClock.Stop(); oldClock.Tick -= Tick; oldClock.Dispose(); }
+        }
+        lock (gate)
+        {
+            foreach (SandevistanGhost ghost in ghosts) ghost.Release();
+            ghosts.Clear();
+        }
+        distanceSinceLastAfterimage = 0;
+        Log("Stopped; all trail layers released, real Capri animation untouched.");
+    }
+    private void Log(string line)
+    {
+        try { if (host != null) host.Log("Sandevistan: " + line); } catch (Exception) { }
+    }
+}
+
+// Each afterimage owns one colorized captured bitmap at Capri's real location.
+// Reference counting keeps release/retirement paths safe.
+internal sealed class SandevistanFrame
+{
+    internal readonly Bitmap Image;
+    private int references;
+    internal SandevistanFrame(Bitmap image) { Image = image; }
+    internal void AddRef() { references++; }
+    internal void Release()
+    {
+        references--;
+        if (references == 0) Image.Dispose();
+        if (references < 0) throw new InvalidOperationException("Afterimage refcount underflow.");
+    }
+    internal void DisposeIfUnreferenced() { if (references == 0) Image.Dispose(); }
+}
+
+internal sealed class SandevistanGhost
+{
+    internal readonly SandevistanFrame Frame;
+    internal readonly Point At;
+    internal readonly long CapturedAt;
+    internal long RetiredAt;
+    internal SandevistanGhost(SandevistanFrame frame, Point at, long capturedAt)
+    { Frame = frame; At = at; CapturedAt = capturedAt; }
+    internal void Release() { Frame.Release(); }
+}
+
+internal sealed class SandevistanComposition
+{
+    internal readonly Rectangle Tile;
+    internal readonly Bitmap Image;
+    internal readonly Point At;
+    internal SandevistanComposition(Rectangle tile, Bitmap image, Point at)
+    { Tile = tile; Image = image; At = at; }
+}
+
+// Transparent click-through overlay behind the original Capri. Never intercepts input or overwrites her animated frame.
+internal sealed class SandevistanOverlay : Form
+{
+    private const int WS_EX_LAYERED = 0x00080000;
+    private const int WS_EX_TRANSPARENT = 0x00000020;
+    private const int WS_EX_TOOLWINDOW = 0x00000080;
+    private const int WS_EX_NOACTIVATE = 0x08000000;
+    private const int WS_EX_TOPMOST = 0x00000008;
+    private const int WS_POPUP = unchecked((int)0x80000000);
+    private const int WM_NCHITTEST = 0x0084;
+    private const int HTTRANSPARENT = -1;
+    private const int SWP_NOACTIVATE = 0x0010;
+    private const int SWP_NOMOVE = 0x0002;
+    private const int SWP_NOSIZE = 0x0001;
+    private const int SWP_SHOWWINDOW = 0x0040;
+    private const int ULW_ALPHA = 2;
+    private const uint DIB_RGB_COLORS = 0;
+    private const uint BI_RGB = 0;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Blend
+    {
+        internal byte Operation;
+        internal byte Flags;
+        internal byte Alpha;
+        internal byte Format;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BitmapInfoHeader
+    {
+        internal uint Size;
+        internal int Width;
+        internal int Height;
+        internal ushort Planes;
+        internal ushort BitCount;
+        internal uint Compression;
+        internal uint SizeImage;
+        internal int XPelsPerMeter;
+        internal int YPelsPerMeter;
+        internal uint ClrUsed;
+        internal uint ClrImportant;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BitmapInfo
+    {
+        internal BitmapInfoHeader Header;
+        internal uint Colors;
+    }
+    [DllImport("user32.dll")] private static extern IntPtr GetDC(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
+    [DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleDC(IntPtr dc);
+    [DllImport("gdi32.dll")] private static extern bool DeleteDC(IntPtr dc);
+    [DllImport("gdi32.dll")] private static extern IntPtr SelectObject(IntPtr dc, IntPtr bitmap);
+    [DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr bitmap);
+    [DllImport("gdi32.dll", SetLastError = true)] private static extern IntPtr CreateDIBSection(IntPtr dc,
+        ref BitmapInfo info, uint usage, out IntPtr bits, IntPtr section, uint offset);
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool UpdateLayeredWindow(IntPtr hwnd,
+        IntPtr dc, ref Point destination, ref Size size, IntPtr memory, ref Point origin,
+        int key, ref Blend blend, int flags);
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool SetWindowPos(IntPtr hwnd,
+        IntPtr insertAfter, int x, int y, int width, int height, int flags);
+
+    private Size currentSize;
+    private bool painted;
+
+    protected override bool ShowWithoutActivation { get { return true; } }
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            CreateParams p = base.CreateParams;
+            p.Style |= WS_POPUP;
+            p.ExStyle |= WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST;
+            return p;
+        }
+    }
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == WM_NCHITTEST) { m.Result = new IntPtr(HTTRANSPARENT); return; }
+        base.WndProc(ref m);
+    }
+    internal SandevistanOverlay()
+    {
+        FormBorderStyle = FormBorderStyle.None;
+        ShowInTaskbar = false;
+        StartPosition = FormStartPosition.Manual;
+        TopMost = true;
+        Bounds = new Rectangle(-10000, -10000, 1, 1);
+    }
+    internal void KeepBehind(IntPtr companion)
+    {
+        if (!painted || !Visible || IsDisposed || companion == IntPtr.Zero) return;
+        SetWindowPos(Handle, companion, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
+    }
+    internal void Present(Bitmap image, Point screenPoint, IntPtr companion)
+    {
+        if (image == null || IsDisposed || companion == IntPtr.Zero ||
+            image.Width <= 0 || image.Height <= 0) return;
+        IntPtr display = IntPtr.Zero, memory = IntPtr.Zero, dib = IntPtr.Zero, old = IntPtr.Zero;
+        BitmapData locked = null;
+        bool paintedNow = false;
+        try
+        {
+            display = GetDC(IntPtr.Zero);
+            if (display == IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            memory = CreateCompatibleDC(display);
+            if (memory == IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            BitmapInfo info = new BitmapInfo();
+            info.Header.Size = (uint)Marshal.SizeOf(typeof(BitmapInfoHeader));
+            info.Header.Width = image.Width;
+            info.Header.Height = -image.Height; // Top-down, exactly matches GDI+ row order.
+            info.Header.Planes = 1;
+            info.Header.BitCount = 32;
+            info.Header.Compression = BI_RGB;
+            IntPtr bits;
+            dib = CreateDIBSection(display, ref info, DIB_RGB_COLORS, out bits, IntPtr.Zero, 0);
+            if (dib == IntPtr.Zero || bits == IntPtr.Zero)
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            old = SelectObject(memory, dib);
+            Rectangle all = new Rectangle(Point.Empty, image.Size);
+            locked = image.LockBits(all, ImageLockMode.ReadOnly, PixelFormat.Format32bppPArgb);
+            // Copy premultiplied BGRA without GetHbitmap (which can lose alpha).
+            int stride = image.Width * 4;
+            byte[] row = new byte[stride];
+            for (int y = 0; y < image.Height; y++)
+            {
+                // Positive stride: top-down GDI+; negative: bottom-up.
+                IntPtr src = IntPtr.Add(locked.Scan0, y * locked.Stride);
+                Marshal.Copy(src, row, 0, stride);
+                Marshal.Copy(row, 0, IntPtr.Add(bits, y * stride), stride);
+            }
+            image.UnlockBits(locked);
+            locked = null;
+            Point origin = Point.Empty;
+            Point target = screenPoint;
+            Size size = image.Size;
+            Blend blend = new Blend { Operation = 0, Flags = 0, Alpha = 255, Format = 1 };
+            if (!UpdateLayeredWindow(Handle, display, ref target, ref size, memory, ref origin, 0, ref blend, ULW_ALPHA))
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            painted = true;
+            paintedNow = true;
+            currentSize = size;
+            // Initialize layered pixels before the HWND ever becomes visible.
+            if (!Visible) Show();
+            SetWindowPos(Handle, companion, screenPoint.X, screenPoint.Y,
+                size.Width, size.Height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        }
+        finally
+        {
+            if (locked != null) image.UnlockBits(locked);
+            if (old != IntPtr.Zero && memory != IntPtr.Zero) SelectObject(memory, old);
+            if (dib != IntPtr.Zero) DeleteObject(dib);
+            if (memory != IntPtr.Zero) DeleteDC(memory);
+            if (display != IntPtr.Zero) ReleaseDC(IntPtr.Zero, display);
+            if (!paintedNow && !painted) Hide();
+        }
+    }
+}
