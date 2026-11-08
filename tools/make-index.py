@@ -28,6 +28,15 @@ def maker(folder):
         raise SystemExit(folder + ': no Made by line and no GitHub account on its first commit')
     return login
 
+def plain(line):
+    # Capri's directory shows the description as plain words: a banner picture is skipped, a link keeps its words,
+    # and bold, italic and code marks come off.
+    line = re.sub(r'!\[[^\]]*\]\([^)]*\)', '', line)
+    line = re.sub(r'\[([^\]]+)\]\([^)]*\)', r'\1', line)
+    line = re.sub(r'\*\*|__|`', '', line)
+    line = re.sub(r'(?<![\w*])[*_](\S(?:.*?\S)?)[*_](?![\w*])', r'\1', line)
+    return ' '.join(line.split())
+
 def sign(path, login):
     # The line goes under Kind like every other README, so the next run doesn't need GitHub.
     with open(path, encoding='utf-8', newline='') as f:
@@ -52,7 +61,7 @@ for folder in sorted(os.listdir(root)):
     readme = open(readme_path, encoding='utf-8').read().replace('\r\n', '\n')
     lines = readme.split('\n')
     name = lines[0].lstrip('# ').strip()
-    about = next(l.strip() for l in lines[1:] if l.strip() and not l.startswith('-') and not l.startswith('#'))
+    about = next(text for text in (plain(l) for l in lines[1:] if not l.startswith('-') and not l.startswith('#')) if text)
     made = re.search(r'^- Made by: (.+)$', readme, re.M)
     author = made.group(1).strip() if made else ''
     if not author:

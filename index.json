@@ -39,7 +39,7 @@
       "name": "Auto Game Hologram",
       "kind": "code",
       "author": "Dominik20074",
-      "about": "![Auto Game Hologram banner](preview.png)"
+      "about": "Auto Game Hologram is a Windows code mod for Capri Desktop. It turns on Capri's click-through Hologram mode when a recognized game is in the foreground. When you leave the game, it restores the previous state if the mod made the change automatically."
     },
     {
       "folder": "btd6-strategy",
@@ -63,7 +63,7 @@
       "name": "Capri Bezel LED",
       "kind": "code",
       "author": "Dominik20074",
-      "about": "![Capri Bezel LED preview](preview.png)"
+      "about": "Capri Bezel LED adds a music-reactive rainbow glow around the edges of your primary display. Colors travel around the screen and blend through the corners. The light fades into transparency toward the center, and mouse clicks pass through the overlay."
     },
     {
       "folder": "cat-ears",
@@ -271,7 +271,7 @@
       "name": "Hologram Speech Glass",
       "kind": "code",
       "author": "Dominik20074",
-      "about": "![Hologram Speech Glass banner](preview.png)"
+      "about": "A Windows code mod for Capri Desktop that makes Capri's speech bubble translucent in Hologram mode."
     },
     {
       "folder": "kintsugi-porcelain",
@@ -551,7 +551,7 @@
       "name": "Talia Yang Capri",
       "kind": "skin",
       "author": "Dominik20074",
-      "about": "A fan-made skin for [Capri Desktop](https://github.com/lachydotmcg/capri-desktop) that replaces Capri's appearance with Talia Yang from *Cyberpunk: Edgerunners II*."
+      "about": "A fan-made skin for Capri Desktop that replaces Capri's appearance with Talia Yang from Cyberpunk: Edgerunners II."
     },
     {
       "folder": "tell-claude",
