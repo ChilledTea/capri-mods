@@ -1,0 +1,319 @@
+// capri-mod: 1
+// id: auto-game-hologram
+// name: Auto Game Hologram
+// version: 1.2.1
+// author: Dominik20074
+// description: Turns hologram on while a game is in front and restores its prior state afterward.
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Windows.Forms;
+using CapriDesktop;
+
+public sealed class AutoGameHologram : ICapriMod
+{
+    private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+    private ICapriHost host;
+    private object owner;
+    private Type sightType;
+    private FieldInfo windowField, titleField, programField;
+    private MethodInfo gameWindow, setHologram;
+    private PropertyInfo hologramOn;
+    private Timer timer;
+    private bool inGame, previous, changed, candidate;
+    private int samples;
+    private HotkeyWindow hotkey;
+    private Control keyRow, anchorRow, keyNote;
+    private string bindingFile;
+    private int modifiers = 3;
+    private int key = (int)Keys.F8;
+
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowText(IntPtr window, StringBuilder text, int capacity);
+
+    public void Start(ICapriHost capri)
+    {
+        host = capri;
+        FieldInfo field = capri.GetType().GetField("capri", Instance);
+        if (field == null || (owner = field.GetValue(capri)) == null)
+            throw new NotSupportedException("Capri mod host is incompatible.");
+        Type type = owner.GetType();
+        sightType = type.Assembly.GetType("CapriDesktop.Sight", true);
+        windowField = sightType.GetField("Window", Instance);
+        titleField = sightType.GetField("Title", Instance);
+        programField = sightType.GetField("Program", Instance);
+        Type computer = type.Assembly.GetType("CapriDesktop.Computer", true);
+        gameWindow = computer.GetMethod("GameWindow", BindingFlags.Static | BindingFlags.NonPublic,
+            null, new[] { sightType }, null);
+        hologramOn = type.GetProperty("HologramOn", Instance);
+        setHologram = type.GetMethod("SetHologram", Instance, null, new[] { typeof(bool) }, null);
+        if (windowField == null || titleField == null || programField == null ||
+            gameWindow == null || hologramOn == null || setHologram == null)
+            throw new NotSupportedException("Capri game detection or hologram interface is incompatible.");
+
+        bindingFile = Path.Combine(host.Folder, "hotkey.txt");
+        if (File.Exists(bindingFile))
+        {
+            string[] saved = File.ReadAllText(bindingFile).Split(',');
+            int savedMods, savedKey;
+            if (saved.Length == 2 && int.TryParse(saved[0], out savedMods) &&
+                int.TryParse(saved[1], out savedKey) && savedMods >= 1 && savedMods <= 7 && savedKey > 0 && savedKey < 256)
+            {
+                modifiers = savedMods;
+                key = savedKey;
+            }
+        }
+        hotkey = new HotkeyWindow(ToggleManual);
+        if (!hotkey.Bind(modifiers, key))
+            host.Log("Auto Game Hologram hotkey unavailable. Open Mainframe Keybinds to choose another.");
+
+        AddKeybindRow();
+        timer = new Timer { Interval = 400 };
+        timer.Tick += Tick;
+        timer.Start();
+    }
+
+    private bool IsGameInFront()
+    {
+        IntPtr window = GetForegroundWindow();
+        if (window == IntPtr.Zero) return false;
+        uint pid;
+        GetWindowThreadProcessId(window, out pid);
+        if (pid == 0) return false;
+        string program;
+        try
+        {
+            using (Process process = Process.GetProcessById((int)pid))
+                program = process.ProcessName;
+        }
+        catch (ArgumentException) { return false; }
+        catch (InvalidOperationException) { return false; }
+
+        StringBuilder title = new StringBuilder(512);
+        GetWindowText(window, title, title.Capacity);
+        string name = title.ToString();
+        if (name.IndexOf("launcher", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            string.Equals(name.Trim(), "Lunar Client", StringComparison.OrdinalIgnoreCase))
+            return false;
+        object sight = Activator.CreateInstance(sightType, true);
+        windowField.SetValue(sight, window);
+        titleField.SetValue(sight, name);
+        programField.SetValue(sight, program);
+        return (bool)gameWindow.Invoke(null, new[] { sight });
+    }
+
+    private bool Current() { return (bool)hologramOn.GetValue(owner, null); }
+
+    private void Set(bool enabled)
+    {
+        if (Current() != enabled) setHologram.Invoke(owner, new object[] { enabled });
+    }
+
+    private void Restore()
+    {
+        if (changed && Current()) Set(previous);
+        changed = false;
+        inGame = false;
+    }
+
+    private void Tick(object sender, EventArgs args)
+    {
+        try
+        {
+            SyncKeybindRow();
+            bool detected = IsGameInFront();
+            if (candidate != detected) { candidate = detected; samples = 0; }
+            if (samples < 2) samples++;
+            if (samples < 2 || inGame == detected) return;
+
+            if (!detected) { Restore(); return; }
+            previous = Current();
+            inGame = true;
+            if (!previous) { changed = true; Set(true); }
+        }
+        catch (Exception error)
+        {
+            Stop();
+            host.Log("Auto Game Hologram stopped: " + error.GetBaseException().Message);
+        }
+    }
+
+    private void ToggleManual()
+    {
+        try
+        {
+            Set(!Current());
+            changed = false;
+
+        }
+        catch (Exception error) { host.Log("Hologram hotkey: " + error.GetBaseException().Message); }
+    }
+
+    public bool Heard(string words) { return false; }
+
+    private void AddKeybindRow()
+    {
+        FieldInfo mainframe = owner.GetType().GetField("mainframe", Instance);
+        Control frame = mainframe == null ? null : mainframe.GetValue(owner) as Control;
+        if (frame == null) { host.Log("Mainframe is unavailable for Hologram hotkey."); return; }
+        Type type = frame.GetType();
+        FieldInfo gameKeys = type.GetField("gameKeys", Instance);
+        FieldInfo keysNote = type.GetField("keysNote", Instance);
+        anchorRow = gameKeys == null ? null : gameKeys.GetValue(frame) as Control;
+        keyNote = keysNote == null ? null : keysNote.GetValue(frame) as Control;
+        MethodInfo make = type.GetMethod("Make", Instance, null, new[] {
+            typeof(string), typeof(int), typeof(int), typeof(int), typeof(int), typeof(EventHandler), typeof(string)
+        }, null);
+        if (anchorRow == null || make == null) { host.Log("Mainframe Keybinds are incompatible."); return; }
+        EventHandler click = delegate { PickHotkey(); };
+        keyRow = make.Invoke(frame, new object[] {
+            "Hologram hotkey", anchorRow.Left, anchorRow.Bottom, anchorRow.Width, anchorRow.Height, click,
+            "Choose a global hotkey to toggle Hologram mode"
+        }) as Control;
+        if (keyRow != null) keyRow.AccessibleName = "Hologram hotkey";
+        SyncKeybindRow();
+    }
+
+    private void SyncKeybindRow()
+    {
+        if (keyRow == null || keyRow.IsDisposed || anchorRow == null || anchorRow.IsDisposed) return;
+        bool noteShown = keyNote != null && !string.IsNullOrEmpty(keyNote.Text);
+        keyRow.Visible = anchorRow.Visible && !noteShown;
+        int top = keyNote == null ? anchorRow.Bottom + 4 : keyNote.Top;
+        keyRow.SetBounds(anchorRow.Left, top, anchorRow.Width, anchorRow.Height);
+        string shortcut = ((modifiers & 2) != 0 ? "Ctrl + " : "") +
+            ((modifiers & 1) != 0 ? "Alt + " : "") +
+            ((modifiers & 4) != 0 ? "Shift + " : "") + ((Keys)key).ToString();
+        string text = "Hologram hotkey: " + shortcut + (hotkey.IsBound ? "" : " (taken)");
+        if (keyRow.Text != text) keyRow.Text = text;
+    }
+
+    private void PickHotkey()
+    {
+        if (hotkey == null) return;
+        using (Form form = new Form { Text = "Auto Game Hologram", ClientSize = new System.Drawing.Size(390, 105),
+            FormBorderStyle = FormBorderStyle.FixedDialog, StartPosition = FormStartPosition.CenterScreen, KeyPreview = true,
+            MinimizeBox = false, MaximizeBox = false, TopMost = true })
+        {
+            Label label = new Label { Dock = DockStyle.Fill, TextAlign = System.Drawing.ContentAlignment.MiddleCenter,
+                Text = "Press Ctrl, Alt or Shift plus a key.\r\nEsc cancels." };
+            form.Controls.Add(label);
+            form.KeyDown += delegate(object sender, KeyEventArgs e)
+            {
+                if (e.KeyCode == Keys.Escape) { form.Close(); return; }
+                int flags = (e.Alt ? 1 : 0) | (e.Control ? 2 : 0) | (e.Shift ? 4 : 0);
+                if (flags == 0 || e.KeyCode == Keys.Menu || e.KeyCode == Keys.ControlKey || e.KeyCode == Keys.ShiftKey) return;
+                e.SuppressKeyPress = true;
+                if (!hotkey.Bind(flags, (int)e.KeyCode))
+                {
+                    label.Text = "That shortcut is already in use. Try another.";
+                    return;
+                }
+                modifiers = flags;
+                key = (int)e.KeyCode;
+                try { File.WriteAllText(bindingFile, modifiers + "," + key); }
+                catch (IOException error) { host.Log("Could not save hotkey: " + error.Message); }
+                SyncKeybindRow();
+                form.Close();
+            };
+            form.ShowDialog();
+        }
+    }
+
+    private sealed class HotkeyWindow : NativeWindow, IDisposable
+    {
+        private readonly Action pressed;
+        private int activeId, activeMods, activeKey;
+        private readonly Timer fallback;
+        private bool held;
+        private int lastPress;
+        private bool pressedBefore;
+
+        [DllImport("user32.dll")]
+        private static extern short GetAsyncKeyState(int key);
+
+        private static bool Down(int key) { return (GetAsyncKeyState(key) & 0x8000) != 0; }
+
+        private void Poll(object sender, EventArgs args)
+        {
+            int flags = (Down(0x12) ? 1 : 0) | (Down(0x11) ? 2 : 0) | (Down(0x10) ? 4 : 0);
+            bool down = activeId != 0 && flags == activeMods && Down(activeKey);
+            if (down && !held) Fire();
+            held = down;
+        }
+
+        private void Fire()
+        {
+            int now = Environment.TickCount;
+            if (pressedBefore && unchecked((uint)(now - lastPress)) < 200) return;
+            pressedBefore = true;
+            lastPress = now;
+            pressed();
+        }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool RegisterHotKey(IntPtr handle, int id, int modifiers, int key);
+        [DllImport("user32.dll")]
+        private static extern bool UnregisterHotKey(IntPtr handle, int id);
+
+        internal HotkeyWindow(Action action)
+        {
+            pressed = action;
+            CreateHandle(new CreateParams { Parent = new IntPtr(-3) });
+            fallback = new Timer { Interval = 30 };
+            fallback.Tick += Poll;
+            fallback.Start();
+        }
+
+        internal bool IsBound { get { return activeId != 0; } }
+
+        internal bool Bind(int mods, int vk)
+        {
+            if (activeId != 0 && mods == activeMods && vk == activeKey) return true;
+            int next = activeId == 1 ? 2 : 1;
+            if (!RegisterHotKey(Handle, next, mods | 0x4000, vk)) return false;
+            if (activeId != 0) UnregisterHotKey(Handle, activeId);
+            activeId = next;
+            activeMods = mods;
+            activeKey = vk;
+            return true;
+        }
+
+        protected override void WndProc(ref Message message)
+        {
+            if (message.Msg == 0x0312 && message.WParam.ToInt32() == activeId) { Fire(); return; }
+            base.WndProc(ref message);
+        }
+
+        public void Dispose()
+        {
+            if (activeId != 0) UnregisterHotKey(Handle, activeId);
+            fallback.Stop();
+            fallback.Dispose();
+            DestroyHandle();
+        }
+    }
+
+    public void Stop()
+    {
+        if (timer != null)
+        {
+            timer.Stop();
+            timer.Tick -= Tick;
+            timer.Dispose();
+            timer = null;
+        }
+        if (keyRow != null) { keyRow.Dispose(); keyRow = null; }
+        if (hotkey != null) { hotkey.Dispose(); hotkey = null; }
+        try { Restore(); }
+        catch (Exception error) { host.Log("Could not restore hologram: " + error.GetBaseException().Message); }
+    }
+}
