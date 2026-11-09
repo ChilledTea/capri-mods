@@ -1,10 +1,9 @@
 // capri-mod: 1
 // id: mirit0-sandevistan
 // name: Sandevistan for Capri
-// version: 1.5.0
+// version: 1.9.0
 // author: Mirit0
-// description: Gives Capri a Sandevistan, activates when moving
-
+// description: Gives Capri a Sandevistan, activates when moving. (New presets and settings)
 
 using System;
 using System.Collections.Generic;
@@ -20,15 +19,53 @@ using CapriDesktop;
 
 internal static class SandevistanSettings
 {
+
+    // Built-in preset selector. Available names:
+    // "Edgerunners" = cyan -> red -> yellow -> cyan
+    // "Rainbow"     = cyan -> magenta -> yellow -> cyan
+    // "RedOnly"     = red -> red -> red -> red
+    // "BlueFire"    = cyan -> blue -> violet -> cyan
+    // "NormalColors" = ORIGINAL Capri colors, no tint; the afterimages just fade
+    // "Original"     = alias for "NormalColors"
+    // "Custom"       = use the CustomCycleColor values below
+    internal const bool EnableColorPreset = true;
+    internal const string ColorPresetName = "Edgerunners";
+
+    // Manual/custom colors used only when EnableColorPreset is false, or when
+    // ColorPresetName is "Custom". Edit these RGB values however you want.
+    internal static readonly Color CustomCycleColor1 = Color.FromArgb(0, 255, 255);   // cyan
+    internal static readonly Color CustomCycleColor2 = Color.FromArgb(255, 0, 0);     // red
+    internal static readonly Color CustomCycleColor3 = Color.FromArgb(255, 255, 0);   // yellow
+
+    // With NormalColors, captured ghosts retain Capri's actual RGB/alpha values.
+    // All presets leave Capri's LIVE animated sprite untouched.
+    internal const int NewestOpacityPercent = 75;
+    internal const bool FadeOlderAfterimages = true;
+
     // Spawn ONE real afterimage each time Capri travels this many pixels while
     // dragging or moving above the speed threshold. No synthetic in-between poses.
     // The distance counter includes small moves across multiple timer ticks.
     internal const int DistanceBetweenAfterimagesPixels = 50;
 
+    // Scale the afterimage distance in proportion to Capri's size.
+    // At 100% size: 50 pixels; at 200% size: 100 pixels (with default distance).
+    // false = always 50 real screen pixels regardless of sprite size.
+    internal const bool ScaleAfterimageSpacingWithSpriteSize = true;
+
+    // 0 = automatically detect the sprite scale (prefer Capri's actual scale
+    // setting, then compare the full bitmap canvas height to the reference).
+    // Set 100 for 100% / 200 for 200% if automatic detection isn't accurate.
+    internal const int SpriteScalePercentOverride = 0;
+
+    // Set to the full 'frame' bitmap height at 100% size in your Capri build.
+    // Only used if Capri exposes no compatible sprite-scale field/property.
+    // Crucially, we DO NOT use the animated silhouette bounds to estimate size.
+    internal const int FrameHeightAt100PercentPixels = 256;
+
     // Check movement every 20 ms. This is a SAMPLE INTERVAL, not a cooldown:
     // if she travels 50px before the next check, capture on that check.
     // Fast movement can yield more than 10 real snapshots per second.
-    internal const int MotionPollIntervalMs = 10;
+    internal const int MotionPollIntervalMs = 20;
 
     // Motion activation threshold measured from Capri's actual on-screen path.
     // Lower = easier to trigger; higher = needs faster movement.
@@ -53,22 +90,22 @@ internal static class SandevistanSettings
 
     // Maximum ACTIVE afterimages. Older ones enter a brief fade-out
     // instead of vanishing the instant this cap is reached.
-    internal const int MaxScreenshots = 40;
+    internal const int MaxScreenshots = 20;
+
+    // No interpolation settings are needed: every afterimage uses a fresh
+    // snapshot of Capri's animated sprite at an actually observed location.
 
     // Ghosts replaced by MaxScreenshots get this additional fade-out time.
     // Memory remains bounded even when the user throws Capri repeatedly.
     internal const int CapacityFadeDurationMs = 320;
     internal const int MaxRetiringGhosts = 40;
 
-    // Complete blue -> purple -> red -> purple -> blue cycle every 100 REAL captures.
-    // The two endpoints transition smoothly without snapping across the cycle boundary.
+    // Complete one configurable color cycle every 100 REAL captures.
+    // When EnableColorPreset is true, the selected preset OVERRIDES the
+    // custom colors below. When false, the custom colors are used directly.
+    // The cycle always uses THREE equal transitions: color1 -> color2 ->
+    // color3 -> back to color1. That avoids any long cyan-to-cyan section.
     internal const int HueCycleScreenshots = 100;
-    internal const double StartHueDegrees = 215.0;
-    internal const double EndHueDegrees = 360.0;
-
-    // Only the captured ghosts are recolored. Capri herself keeps her real, animated sprite.
-    internal const int NewestOpacityPercent = 75;
-    internal const bool FadeOlderAfterimages = true;
 
     // Keep the real, normally animated Capri window above other apps.
     internal const bool KeepCapriAlwaysOnTop = true;
@@ -76,8 +113,9 @@ internal static class SandevistanSettings
     // A location jump larger than this within one polling tick is a teleport, not a throw.
     internal const int IgnoreTeleportDistancePixels = 1300;
 
-    // Skip tiny changes in the alpha bounds caused by blinking or pose animation.
-    internal const int MinimumUnanchoredSpriteDisplacementPixels = 18;
+    // Never use animated alpha bounds to measure motion. Only Capri's
+    // actual native window position contributes to the traveled distance.
+    // This prevents dancing, blinking, spinning and breathing false positives.
 
     // The frame may be a full transparent canvas. Crop its nontransparent pixels.
     // 4 = sample alpha on a 4px grid; 1 = scan every pixel (slower).
@@ -112,13 +150,11 @@ public sealed class SandevistanAfterimages : ICapriMod
     private FieldInfo frameMember, hiddenMember, dockedMember;
     private System.Windows.Forms.Timer clock;
     private bool wasTopMost, savedTopMost, started, moving, dragFromEvent, mouseDownOnCapri;
-    private Point previousPosition, previousWindowPosition, mouseStart, lastWorldAnchor;
-    private Point previousVisualOffset, previousWindowPositionAtLastTick;
-    private FieldInfo worldXField, worldYField;
-    private double lastWorldX, lastWorldY;
-    private bool worldInitialized;
+    private Point previousPosition, mouseStart;
+    private FieldInfo scaleField;
+    private PropertyInfo scaleProperty;
     private byte[] alphaPixels;
-    private bool hasMotionSample, worldMotionThisTick;
+    private bool hasMotionSample;
     private long previousTimestamp, lastFastTimestamp, lastRenderTimestamp;
     private int capturedCount, generation, busy;
     private volatile bool stopped;
@@ -167,9 +203,8 @@ public sealed class SandevistanAfterimages : ICapriMod
         frameMember = capri.GetType().GetField("frame", Members);
         hiddenMember = capri.GetType().GetField("hidden", Members);
         dockedMember = capri.GetType().GetField("docked", Members);
-        // Optional private, numeric position fields: version-dependent and validated at runtime.
-        worldXField = FindNumericField("x", "posX", "spriteX", "petX", "cx");
-        worldYField = FindNumericField("y", "posY", "spriteY", "petY", "cy");
+        // Optional size metadata. Never infer position from animation fields.
+        LocateSpriteScaleMember();
         if (frameMember == null || !typeof(Bitmap).IsAssignableFrom(frameMember.FieldType))
         {
             Log("This Capri build has no compatible transparent frame bitmap. Effect disabled.");
@@ -191,12 +226,7 @@ public sealed class SandevistanAfterimages : ICapriMod
         capri.MouseMove += CapriMouseMove;
         capri.MouseUp += CapriMouseUp;
         capri.MouseCaptureChanged += CapriMouseCaptureChanged;
-        previousWindowPosition = GetActualWindowPosition();
-        previousWindowPositionAtLastTick = previousWindowPosition;
-        previousPosition = previousWindowPosition;
-        previousVisualOffset = Point.Empty;
-        lastWorldAnchor = previousWindowPosition;
-        worldInitialized = false;
+        previousPosition = GetActualWindowPosition();
         hasMotionSample = false;
         distanceSinceLastAfterimage = 0;
         previousTimestamp = Stopwatch.GetTimestamp();
@@ -209,9 +239,11 @@ public sealed class SandevistanAfterimages : ICapriMod
         clock.Tick += Tick;
         started = true;
         clock.Start();
-        Log("1.5.0 ready: one real snapshot per " +
+        Log("1.9.0 ready: one real snapshot per " +
             Math.Max(1, SandevistanSettings.DistanceBetweenAfterimagesPixels) +
-            "px traveled (no interpolation); motion checked every " +
+            "px traveled at 100% scale (no interpolation); sprite-size scaling " +
+            (SandevistanSettings.ScaleAfterimageSpacingWithSpriteSize ? "on" : "off") +
+            "; motion checked every " +
             Math.Max(15, SandevistanSettings.MotionPollIntervalMs) +
             "ms; animated sprite untouched; throw threshold " +
             SandevistanSettings.MinimumSpeedPixelsPerSecond + " px/s.");
@@ -268,30 +300,59 @@ public sealed class SandevistanAfterimages : ICapriMod
         return capri == null ? Point.Empty : capri.Location;
     }
 
-    private FieldInfo FindNumericField(params string[] names)
+    private static bool NumericType(Type type)
     {
-        if (capri == null) return null;
+        return type == typeof(float) || type == typeof(double) ||
+            type == typeof(decimal) || type == typeof(int) ||
+            type == typeof(uint) || type == typeof(short);
+    }
+
+    private void LocateSpriteScaleMember()
+    {
+        scaleField = null;
+        scaleProperty = null;
+        if (capri == null) return;
+        string[] names = {
+            "spriteScale", "SpriteScale", "currentScale", "CurrentScale",
+            "cobScale", "CobScale", "characterScale", "CharacterScale",
+            "petScale", "PetScale", "scaleFactor", "ScaleFactor",
+            "zoom", "Zoom", "scale"
+        };
         foreach (string name in names)
         {
-            FieldInfo f = capri.GetType().GetField(name, Members);
-            if (f != null && (f.FieldType == typeof(int) || f.FieldType == typeof(float) ||
-                f.FieldType == typeof(double))) return f;
+            FieldInfo field = capri.GetType().GetField(name, Members);
+            if (field != null && NumericType(field.FieldType)) { scaleField = field; return; }
+            PropertyInfo prop = capri.GetType().GetProperty(name, Members);
+            if (prop != null && NumericType(prop.PropertyType) && prop.GetIndexParameters().Length == 0)
+            { scaleProperty = prop; return; }
         }
-        return null;
     }
-    private bool ReadWorld(out double x, out double y)
+
+    private double SpriteScaleFactor(Bitmap frame)
     {
-        x = y = 0;
-        if (worldXField == null || worldYField == null) return false;
+        if (!SandevistanSettings.ScaleAfterimageSpacingWithSpriteSize) return 1.0;
+        int forced = SandevistanSettings.SpriteScalePercentOverride;
+        if (forced > 0) return ClampSpriteScale(forced / 100.0);
         try
         {
-            x = Convert.ToDouble(worldXField.GetValue(capri));
-            y = Convert.ToDouble(worldYField.GetValue(capri));
-            return !Double.IsNaN(x) && !Double.IsNaN(y) &&
-                !Double.IsInfinity(x) && !Double.IsInfinity(y) &&
-                Math.Abs(x) < 1000000 && Math.Abs(y) < 1000000;
+            object value = scaleField != null ? scaleField.GetValue(capri) :
+                (scaleProperty != null ? scaleProperty.GetValue(capri, null) : null);
+            if (value != null)
+            {
+                double scale = Convert.ToDouble(value);
+                // Capri versions may express scale as 2.0 or as 200%.
+                if (scale >= 10.0 && scale <= 500.0) scale /= 100.0;
+                if (scale >= 0.25 && scale <= 5.0) return scale;
+            }
         }
-        catch (Exception) { return false; }
+        catch (Exception) { /* A changed private field falls back safely. */ }
+        // Full sprite canvas, not the pose-dependent nontransparent rectangle.
+        int baseHeight = Math.Max(1, SandevistanSettings.FrameHeightAt100PercentPixels);
+        return ClampSpriteScale(frame.Height / (double)baseHeight);
+    }
+    private static double ClampSpriteScale(double factor)
+    {
+        return Math.Max(0.25, Math.Min(5.0, factor));
     }
 
     // Read only alpha. This does not alter the frame or pause Capri's animation.
@@ -335,43 +396,12 @@ public sealed class SandevistanAfterimages : ICapriMod
         finally { if (data != null) frame.UnlockBits(data); }
     }
 
-    // Use HWND movement, an internal world coordinate (if present), or the
-    // position of the visible alpha sprite inside the frame.  Whichever actually
-    // travels is used, rather than pinning every rotated pose at the throw origin.
-    private Point LocateSprite(Point windowAt, Rectangle visible)
-    {
-        Point offset = visible.IsEmpty ? Point.Empty : visible.Location;
-        Point result = new Point(windowAt.X + offset.X, windowAt.Y + offset.Y);
-        double x, y;
-        worldMotionThisTick = false;
-        if (ReadWorld(out x, out y))
-        {
-            if (!worldInitialized)
-            {
-                lastWorldX = x; lastWorldY = y;
-                lastWorldAnchor = windowAt;
-                worldInitialized = true;
-            }
-            bool windowStayed = Distance(windowAt, previousWindowPosition) <= 2;
-            bool imageStayed = Distance(offset, previousVisualOffset) <
-                SandevistanSettings.MinimumUnanchoredSpriteDisplacementPixels;
-            double wx = x - lastWorldX, wy = y - lastWorldY;
-            if (windowStayed && imageStayed && Math.Abs(wx) < 10000 && Math.Abs(wy) < 10000)
-            {
-                worldMotionThisTick = Math.Abs(wx) + Math.Abs(wy) >= 1.0;
-                lastWorldAnchor = new Point(lastWorldAnchor.X + (int)Math.Round(wx),
-                    lastWorldAnchor.Y + (int)Math.Round(wy));
-                result = new Point(lastWorldAnchor.X + offset.X, lastWorldAnchor.Y + offset.Y);
-            }
-            else lastWorldAnchor = windowAt;
-            lastWorldX = x; lastWorldY = y;
-        }
-        previousVisualOffset = offset;
-        previousWindowPosition = windowAt;
-        return result;
-    }
+    // Physical movement is measured ONLY from the Win32 window rectangle.
+    // Do not use the visible alpha sprite origin: dancing, rotating, blinking,
+    // and breathing all move that origin without moving Capri's actual window.
+    // The crop offset is applied later solely to PLACE the snapshot correctly.
 
-    private bool CurrentlyDragging(Point current, double pathDistance)
+    private bool CurrentlyDragging(double pathDistance)
     {
         if (!SandevistanSettings.ActivateWhileDragging) return false;
         bool down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
@@ -452,21 +482,18 @@ public sealed class SandevistanAfterimages : ICapriMod
             if (currentFrame == null || currentFrame.Width <= 0 || currentFrame.Height <= 0 ||
                 (long)currentFrame.Width * currentFrame.Height > SandevistanSettings.MaxSourcePixels)
             { Deactivate(); return; }
-            Rectangle visible = GetVisibleSpriteBounds(currentFrame);
-            if (visible.IsEmpty) { Deactivate(); return; }
-            Point current = LocateSprite(windowAt, visible);
+            // Native window motion is independent of sprite pose changes.
+            // No alpha bounds scan occurs until we actually need a snapshot.
+            Point current = windowAt;
             if (!hasMotionSample)
             {
                 previousPosition = current;
-                previousWindowPositionAtLastTick = windowAt;
                 previousTimestamp = now;
                 hasMotionSample = true;
                 return;
             }
             double pathDistance = Distance(previousPosition, current);
             double dt = Math.Max(1.0, Milliseconds(previousTimestamp, now));
-            bool movedWindow = Distance(previousWindowPositionAtLastTick, windowAt) > 1;
-            previousWindowPositionAtLastTick = windowAt;
             previousPosition = current;
             previousTimestamp = now;
 
@@ -479,12 +506,10 @@ public sealed class SandevistanAfterimages : ICapriMod
                 return;
             }
             double speed = pathDistance * 1000.0 / dt;
-            bool drag = CurrentlyDragging(current, pathDistance);
-            // A rotating/idle pose can move its alpha-bound origin slightly. If
-            // neither the actual window nor body coordinates are translating,
-            // suppress such false movement triggers.
-            bool meaningfulMotion = movedWindow || worldMotionThisTick ||
-                pathDistance >= SandevistanSettings.MinimumUnanchoredSpriteDisplacementPixels;
+            bool drag = CurrentlyDragging(pathDistance);
+            // Only genuine native window translation counts as motion.
+            // A dance can alter the frame pixels freely without creating ghosts.
+            bool meaningfulMotion = pathDistance >= 0.75;
             bool fast = SandevistanSettings.ActivateOnFastThrows && meaningfulMotion &&
                 speed >= Math.Max(1.0, SandevistanSettings.MinimumSpeedPixelsPerSecond);
             bool captureMotion = fast || drag;
@@ -523,7 +548,8 @@ public sealed class SandevistanAfterimages : ICapriMod
                 QueueFadeRedraw(now);
                 return;
             }
-            double spacing = Math.Max(1.0, SandevistanSettings.DistanceBetweenAfterimagesPixels);
+            double spacing = Math.Max(1.0, SandevistanSettings.DistanceBetweenAfterimagesPixels) *
+                SpriteScaleFactor(currentFrame);
             distanceSinceLastAfterimage += pathDistance;
             if (distanceSinceLastAfterimage < spacing)
             {
@@ -539,13 +565,16 @@ public sealed class SandevistanAfterimages : ICapriMod
             bool workerQueued = false;
             try
             {
-                // Clone the *current* animated pose, not the previous pose or a
-                // screen capture. Cropping also prevents full-screen allocations.
+                // Crop only AFTER qualifying actual translation. Animation affects
+                // appearance, not trail distance or whether the effect activates.
+                Rectangle visible = GetVisibleSpriteBounds(currentFrame);
+                if (visible.IsEmpty) { distanceSinceLastAfterimage %= spacing; return; }
                 copied = currentFrame.Clone(visible, PixelFormat.Format32bppPArgb);
                 lastRenderTimestamp = now;
                 int ordinal = capturedCount++;
                 int run = generation;
-                Point capturedPosition = current; // Exact position sampled with the pose.
+                Point capturedPosition = new Point(windowAt.X + visible.Left,
+                    windowAt.Y + visible.Top); // Visual placement; NOT motion measurement.
                 Bitmap work = copied;
                 copied = null; // Worker owns it now.
                 long capturedAt = now;
@@ -592,12 +621,21 @@ public sealed class SandevistanAfterimages : ICapriMod
         try
         {
             if (stopped || run != generation) return;
-            int period = Math.Max(2, SandevistanSettings.HueCycleScreenshots);
-            double phase = (number % period) / (double)period;
-            double sweep = 0.5 - 0.5 * Math.Cos(2.0 * Math.PI * phase);
-            double hue = SandevistanSettings.StartHueDegrees +
-                (SandevistanSettings.EndHueDegrees - SandevistanSettings.StartHueDegrees) * sweep;
-            colorized = Colorize(source, hue);
+            if (UseOriginalColors())
+            {
+                // The capture is already an independent snapshot, cloned on the UI thread.
+                // Move ownership rather than recoloring or re-cloning it, so we preserve
+                // Capri's original RGB values, alpha and current animated pose exactly.
+                colorized = source;
+                source = null;
+            }
+            else
+            {
+                int period = Math.Max(3, SandevistanSettings.HueCycleScreenshots);
+                double phase = (number % period) / (double)period;
+                Color tint = CycleColor(phase);
+                colorized = Colorize(source, tint);
+            }
             if (colorized == null) return;
             lock (gate)
             {
@@ -621,7 +659,7 @@ public sealed class SandevistanAfterimages : ICapriMod
         catch (Exception error) { Log("Color processing: " + error.Message); }
         finally
         {
-            source.Dispose();
+            if (source != null) source.Dispose();
             if (colorized != null) colorized.Dispose();
             if (!rendering) Interlocked.Exchange(ref busy, 0);
         }
@@ -727,7 +765,7 @@ public sealed class SandevistanAfterimages : ICapriMod
         }
     }
 
-    private static Bitmap Colorize(Bitmap source, double targetHue)
+    private static Bitmap Colorize(Bitmap source, Color tint)
     {
         int w = source.Width, h = source.Height;
         Rectangle full = new Rectangle(0, 0, w, h);
@@ -744,7 +782,6 @@ public sealed class SandevistanAfterimages : ICapriMod
             IntPtr from = input.Stride < 0 ? IntPtr.Add(input.Scan0, input.Stride * (h - 1)) : input.Scan0;
             IntPtr to = output.Stride < 0 ? IntPtr.Add(output.Scan0, output.Stride * (h - 1)) : output.Scan0;
             Marshal.Copy(from, before, 0, before.Length);
-            Color tint = FromHue(targetHue);
             double b = tint.B / 255.0, g = tint.G / 255.0, r = tint.R / 255.0;
             for (int y = 0; y < h; y++)
             {
@@ -777,20 +814,80 @@ public sealed class SandevistanAfterimages : ICapriMod
         }
     }
 
-    private static Color FromHue(double degrees)
+    // True only when the enabled preset explicitly requests original sprite colors.
+    // Disabling presets always restores the custom RGB color cycle.
+    private static bool UseOriginalColors()
     {
-        double hue = ((degrees % 360.0) + 360.0) % 360.0;
-        double x = 1.0 - Math.Abs((hue / 60.0) % 2.0 - 1.0);
-        double r = 0, g = 0, b = 0;
-        if (hue < 60) { r = 1; g = x; }
-        else if (hue < 120) { r = x; g = 1; }
-        else if (hue < 180) { g = 1; b = x; }
-        else if (hue < 240) { g = x; b = 1; }
-        else if (hue < 300) { r = x; b = 1; }
-        else { r = 1; b = x; }
-        return Color.FromArgb((int)Math.Round(255 * (0.08 + 0.92 * r)),
-            (int)Math.Round(255 * (0.08 + 0.92 * g)),
-            (int)Math.Round(255 * (0.08 + 0.92 * b)));
+        if (!SandevistanSettings.EnableColorPreset) return false;
+        string name = (SandevistanSettings.ColorPresetName ?? "").Trim();
+        return name.Equals("NormalColors", StringComparison.OrdinalIgnoreCase) ||
+            name.Equals("Original", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static Color CycleColor(double phase)
+    {
+        Color c1, c2, c3;
+        ResolveCycleColors(out c1, out c2, out c3);
+        double t = phase - Math.Floor(phase);
+        if (t < (1.0 / 3.0))
+            return LerpColor(c1, c2, t * 3.0);
+        if (t < (2.0 / 3.0))
+            return LerpColor(c2, c3, (t - (1.0 / 3.0)) * 3.0);
+        return LerpColor(c3, c1, (t - (2.0 / 3.0)) * 3.0);
+    }
+
+    private static void ResolveCycleColors(out Color c1, out Color c2, out Color c3)
+    {
+        string preset = (SandevistanSettings.ColorPresetName ?? "").Trim();
+        bool usePreset = SandevistanSettings.EnableColorPreset &&
+            !preset.Equals("Custom", StringComparison.OrdinalIgnoreCase);
+        if (!usePreset)
+        {
+            c1 = SandevistanSettings.CustomCycleColor1;
+            c2 = SandevistanSettings.CustomCycleColor2;
+            c3 = SandevistanSettings.CustomCycleColor3;
+            return;
+        }
+        if (preset.Equals("Edgerunners", StringComparison.OrdinalIgnoreCase))
+        {
+            c1 = Color.FromArgb(0, 255, 255);
+            c2 = Color.FromArgb(255, 0, 0);
+            c3 = Color.FromArgb(255, 255, 0);
+            return;
+        }
+        if (preset.Equals("Rainbow", StringComparison.OrdinalIgnoreCase))
+        {
+            c1 = Color.FromArgb(0, 255, 255);
+            c2 = Color.FromArgb(255, 0, 255);
+            c3 = Color.FromArgb(255, 255, 0);
+            return;
+        }
+        if (preset.Equals("RedOnly", StringComparison.OrdinalIgnoreCase))
+        {
+            c1 = Color.FromArgb(255, 0, 0);
+            c2 = Color.FromArgb(255, 0, 0);
+            c3 = Color.FromArgb(255, 0, 0);
+            return;
+        }
+        if (preset.Equals("BlueFire", StringComparison.OrdinalIgnoreCase))
+        {
+            c1 = Color.FromArgb(0, 255, 255);
+            c2 = Color.FromArgb(0, 110, 255);
+            c3 = Color.FromArgb(170, 0, 255);
+            return;
+        }
+        c1 = SandevistanSettings.CustomCycleColor1;
+        c2 = SandevistanSettings.CustomCycleColor2;
+        c3 = SandevistanSettings.CustomCycleColor3;
+    }
+
+    private static Color LerpColor(Color from, Color to, double t)
+    {
+        double q = t < 0 ? 0 : (t > 1 ? 1 : t);
+        int r = (int)Math.Round(from.R + (to.R - from.R) * q);
+        int g = (int)Math.Round(from.G + (to.G - from.G) * q);
+        int b = (int)Math.Round(from.B + (to.B - from.B) * q);
+        return Color.FromArgb(r, g, b);
     }
 
     private static Bitmap Compose(List<SandevistanGhost> frames, Rectangle tile, long now, out Point at)
@@ -944,7 +1041,7 @@ public sealed class SandevistanAfterimages : ICapriMod
     }
 }
 
-// Each afterimage owns one colorized captured bitmap at Capri's real location.
+// Each afterimage owns an original-color or colorized captured bitmap at Capri's real location.
 // Reference counting keeps release/retirement paths safe.
 internal sealed class SandevistanFrame
 {

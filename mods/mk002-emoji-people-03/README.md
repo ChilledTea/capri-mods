@@ -1,10 +1,8 @@
-# Emoji People & Body 3
+# Emoji Pack : People & Body 3
 
-Emoji Pack : People & Body 3
 Adds more emojis to use in Mirit0's Caprichat
 
-* Kind: code
-
+- Kind: code
 - Made by: Mirit0
 
 320 emojis in this pack:

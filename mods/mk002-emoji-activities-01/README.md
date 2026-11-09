@@ -1,10 +1,8 @@
-# Emoji Activities 1
+# Emoji Pack : Activities 1
 
-Emoji Pack : Activities 1
 Adds more emojis to use in Mirit0's Caprichat
 
-* Kind: code
-
+- Kind: code
 - Made by: Mirit0
 
 85 emojis in this pack:

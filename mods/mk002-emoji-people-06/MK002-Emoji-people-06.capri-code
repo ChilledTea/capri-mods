@@ -1,9 +1,14 @@
 // capri-mod: 1
 // id: mk002-emoji-people-06
 // name: Emoji People & Body 6
-// version: 1.0.0
+// version: 2.1.14
 // author: Mirit0
 // description: additional emoji's for Caprichat
+
+// Twemoji 17.0.1 (c) Twitter and contributors, CC BY 4.0.
+// https://github.com/jdecked/twemoji
+// Artwork repacked into PNG sprite atlases.
+
 using System;
 using System.IO;
 using CapriDesktop;
@@ -12,7 +17,7 @@ public sealed class MK002EmojiPeople06 : ICapriMod
     private string published;
     public void Start(ICapriHost host)
     {
-        string root=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Capri","mods");
+        string root=Directory.GetParent(host.Folder).FullName;
         string folder=Path.Combine(root,"mk002-caprichat-data","emoji-packs");
         Directory.CreateDirectory(folder);
         published=Path.Combine(folder,"pack-1-1600.png");

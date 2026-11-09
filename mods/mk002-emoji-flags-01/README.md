@@ -1,10 +1,8 @@
-# Emoji Flags 1
+# Emoji Pack : Flags 1
 
-Emoji Pack : Flags 1
 Adds more emojis to use in Mirit0's Caprichat
 
-* Kind: code
-
+- Kind: code
 - Made by: Mirit0
 
 270 emojis in this pack:

@@ -1,10 +1,8 @@
-# Emoji Symbols 1
+# Emoji Pack : Symbols 1
 
-Emoji Pack : Symbols 1
 Adds more emojis to use in Mirit0's Caprichat
 
-* Kind: code
-
+- Kind: code
 - Made by: Mirit0
 
 210 emojis in this pack:
