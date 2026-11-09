@@ -1,26 +1,32 @@
-# Capri mods
+# Auto Game Hologram
 
-Mods for [Capri](https://github.com/lachydotmcg/capri-desktop), the desktop companion. Find one you like, or share your own.
+![Auto Game Hologram banner](preview.png)
 
-Every mod is checked for malware before it goes up here.
+Auto Game Hologram is a Windows code mod for [Capri Desktop](https://github.com/lachydotmcg/capri-desktop). It turns on Capri's click-through Hologram mode when a recognized game is in the foreground. When you leave the game, it restores the previous state if the mod made the change automatically.
 
-## Kinds of mod
-- **Settings mods** (`.capri-mod`): extra names, colours and other settings. In Capri 0.8.5 or newer, a mod that only changes her colours shows under Skins.
-- **Code mods** (`.capri-code`): C# that Capri compiles and runs. Code mods can do anything on your PC, so Capri asks before running one.
-- **Skins** (`.capri-skin`): a zip of pictures that replace her art.
-- **Skills** (`.capri-skill`): know-how for a game, like what to build and when. Capri follows it whenever she plays that game. Skills need Capri 0.8.4 or newer.
+## Installation
 
-## Using a mod
-In Capri 0.8.3 or newer, open Capri Mainframe and press Mods in the CAPRI band. Browse mods lists everything here with previews, downloads and ratings, and Install puts a mod in and turns it on. You can also download a mod file from here and use Import mod.
+1. Download [auto-game-hologram.capri-code](auto-game-hologram.capri-code).
+2. Select and approve the code mod when prompted.
 
-## Sharing a mod
-1. Fork this repo.
-2. Add a folder under `mods/` named after your mod. Put in the mod file and a short `README.md` that says what it does. Your GitHub username goes on it as the author. Add a `- Made by:` line if you'd like a different name.
-3. Add a picture called `preview.png`, around 16:9, if you have one. That picture is what people see in Capri's mods window. Mods without one get a default picture.
-4. Open a pull request.
+## Controls
 
-## Stay safe
-- Only install mods from here, or from people you trust.
-- Only get Capri itself from [capriai.app](https://capriai.app) or [its GitHub](https://github.com/lachydotmcg/capri-desktop/releases).
+- Press **Ctrl + Alt + F8** to toggle Hologram mode manually, including in games Capri does not detect.
+- To change the shortcut, open **Mainframe → Settings → Keybinds** and select **Hologram hotkey** under **Gaming Mode**.
+- Press your new key combination in the dialog. Capri saves it for future sessions.
 
-Questions? Ask on the [Capri Discord](https://discord.gg/capridesktop).
+## Compatibility
+
+Version **1.2.1** was tested in-game on Windows with Capri 0.8.5.1. The mod uses internal Capri interfaces for game detection, Hologram mode and the Keybinds entry. Future Capri updates may require a mod update.
+
+## Changelog
+
+### v2.0
+
+- Fixed scrolling for the **Hologram hotkey** row under **Mainframe → Settings → Keys**. The row now moves with the rest of the settings.
+- Future updates will be provided.
+
+## Credits
+
+- Made by: Dominik20074
+- AI assisted with the code and banner.
