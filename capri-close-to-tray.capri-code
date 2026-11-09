@@ -1,0 +1,84 @@
+// capri-mod: 1
+// id: capri-close-to-tray
+// name: Capri Close to Tray
+// version: 1.0.0
+// author: Dominik20074
+// description: Hides Mainframe when you close it and restores it from Capri's tray icon.
+
+using System;
+using System.Reflection;
+using System.Windows.Forms;
+using CapriDesktop;
+
+public sealed class CapriCloseToTray : ICapriMod
+{
+    private const BindingFlags Fields = BindingFlags.Instance | BindingFlags.NonPublic;
+    private Form mainframe;
+    private NotifyIcon tray;
+    private bool hiddenByMod;
+
+    public void Start(ICapriHost host)
+    {
+        var ownerField = host.GetType().GetField("capri", Fields);
+        object owner = ownerField == null ? null : ownerField.GetValue(host);
+        if (owner != null)
+        {
+            var frameField = owner.GetType().GetField("mainframe", Fields);
+            var trayField = owner.GetType().GetField("tray", Fields);
+            mainframe = frameField == null ? null : frameField.GetValue(owner) as Form;
+            tray = trayField == null ? null : trayField.GetValue(owner) as NotifyIcon;
+        }
+
+        if (mainframe == null || tray == null)
+        {
+            host.Log("Close to Tray could not find Mainframe and its tray icon.");
+            return;
+        }
+
+        mainframe.FormClosing += CloseToTray;
+        mainframe.VisibleChanged += VisibilityChanged;
+        tray.DoubleClick += RestoreFromTray;
+    }
+
+    public bool Heard(string words) { return false; }
+
+    private void CloseToTray(object sender, FormClosingEventArgs args)
+    {
+        // Capri cancels the ordinary close before raising this event. Actual shutdown is allowed through.
+        if (args.CloseReason != CloseReason.UserClosing || !args.Cancel || !tray.Visible) return;
+        hiddenByMod = true;
+        mainframe.Hide();
+    }
+
+    private void VisibilityChanged(object sender, EventArgs args)
+    {
+        if (mainframe.Visible) hiddenByMod = false;
+    }
+
+    private void RestoreFromTray(object sender, EventArgs args)
+    {
+        if (!hiddenByMod || mainframe.IsDisposed) return;
+        mainframe.Show();
+        if (mainframe.WindowState == FormWindowState.Minimized)
+            mainframe.WindowState = FormWindowState.Normal;
+        mainframe.Activate();
+    }
+
+    public void Stop()
+    {
+        if (tray != null) tray.DoubleClick -= RestoreFromTray;
+        if (mainframe != null && !mainframe.IsDisposed)
+        {
+            mainframe.FormClosing -= CloseToTray;
+            mainframe.VisibleChanged -= VisibilityChanged;
+            if (hiddenByMod && tray != null && tray.Visible)
+            {
+                mainframe.Show();
+                mainframe.WindowState = FormWindowState.Minimized;
+            }
+        }
+        hiddenByMod = false;
+        mainframe = null;
+        tray = null;
+    }
+}

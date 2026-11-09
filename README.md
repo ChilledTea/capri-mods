@@ -1,26 +1,26 @@
-# Capri mods
+# Capri Close to Tray
 
-Mods for [Capri](https://github.com/lachydotmcg/capri-desktop), the desktop companion. Find one you like, or share your own.
+![Capri Close to Tray banner](preview.png)
 
-Every mod is checked for malware before it goes up here.
+A Windows code mod that lets you close Capri's Mainframe to the system tray.
 
-## Kinds of mod
-- **Settings mods** (`.capri-mod`): extra names, colours and other settings. In Capri 0.8.5 or newer, a mod that only changes her colours shows under Skins.
-- **Code mods** (`.capri-code`): C# that Capri compiles and runs. Code mods can do anything on your PC, so Capri asks before running one.
-- **Skins** (`.capri-skin`): a zip of pictures that replace her art.
-- **Skills** (`.capri-skill`): know-how for a game, like what to build and when. Capri follows it whenever she plays that game. Skills need Capri 0.8.4 or newer.
+-  Close (X) hides Mainframe while Capri keeps running.
+- minimize (-) button minimizes Mainframe to the taskbar as usual.
+- Double-click Capri's tray icon or right-click it and choose **Open Capri Mainframe** to restore the window.
 
-## Using a mod
-In Capri 0.8.3 or newer, open Capri Mainframe and press Mods in the CAPRI band. Browse mods lists everything here with previews, downloads and ratings, and Install puts a mod in and turns it on. You can also download a mod file from here and use Import mod.
+If the icon appears next to the clock, drag it into the hidden icons panel (**^**). Windows controls where tray icons appear.
 
-## Sharing a mod
-1. Fork this repo.
-2. Add a folder under `mods/` named after your mod. Put in the mod file and a short `README.md` that says what it does. Your GitHub username goes on it as the author. Add a `- Made by:` line if you'd like a different name.
-3. Add a picture called `preview.png`, around 16:9, if you have one. That picture is what people see in Capri's mods window. Mods without one get a default picture.
-4. Open a pull request.
 
-## Stay safe
-- Only install mods from here, or from people you trust.
-- Only get Capri itself from [capriai.app](https://capriai.app) or [its GitHub](https://github.com/lachydotmcg/capri-desktop/releases).
+## Installation
 
-Questions? Ask on the [Capri Discord](https://discord.gg/capridesktop).
+1. Download [capri-close-to-tray.capri-code](capri-close-to-tray.capri-code).
+2. In Capri, open **Mainframe → Mods → approve the code mod when prompted.
+
+Windows Settings → Personalization → Taskbar → Other system tray icons → activate the slider for Capri to show Mainframe on the Right Tray side Unminimized.
+
+Say: Hey Capri or Capri Open Mainframe to open mainframe when in Hidden Tray Mode.
+
+The mod uses Capri's existing tray icon and makes no changes to Windows system files.
+
+- Made by: Dominik20074
+- Version: 1.0.0
