@@ -2,22 +2,21 @@
 
 ![Capri Bezel LED preview](preview.png)
 
-Capri Bezel LED adds a music-reactive rainbow glow around the edges of your primary display. Colors travel around the screen and blend through the corners. The light fades into transparency toward the center, and mouse clicks pass through the overlay.
-
-When Capri detects the beat, the glow pulses in time with it. While music is playing without a detected beat, the glow pulses gently. It fades out when playback stops.
+Music Light adds a diffuse, moving RGB glow around your primary display. It pulses to music, with an extra brightness boost on detected bass hits. The overlay fades inward and lets mouse clicks pass through.
 
 ## Installation
 
 1. Download [capri-bezel-led.capri-code](capri-bezel-led.capri-code).
-2. In Capri, open **Mainframe → CAPRI → Mods → Import mod** and select the file.
+2. Open **Mainframe → CAPRI → Mods → Import mod** and select the file.
 3. Approve the code mod when prompted.
-4. Open **Mainframe → Settings → Capri** and use **Music Light**, directly below **Hologram**, to turn the effect on or off. The mod remembers your choice.
+4. Use **Mainframe → Settings → Capri → Music Light** to enable or disable the effect.
 
-## Compatibility
+## Changelog
 
-Version **0.5.2** is a Windows code mod for Capri Desktop. It uses Capri's internal music detection and Mainframe controls. Future Capri updates may require a mod update.
+## Submit without git
+No git needed: fill in the [Submit a mod](https://github.com/lachydotmcg/capri-mods/issues/new?template=submit-mod.yml) form and drag your mod file in, zipped first. A pull request gets opened for you, with your GitHub username as the author, and it's read like any other mod before it goes up. To change something, edit your issue.
 
-## Credits
+## Stay safe
+- Only install mods from here, or from people you trust.
+- Only get Capri itself from [capriai.app](https://capriai.app) or [its GitHub](https://github.com/lachydotmcg/capri-desktop/releases).
 
-- Made by: Dominik20074
-- AI assisted with the code and preview artwork.

@@ -1,13 +1,14 @@
 // capri-mod: 1
 // id: capri-bezel-led
 // name: Capri Bezel LED
-// version: 0.5.2
+// version: 0.6.1
 // author: Dominik20074
 // description: Adds a music reactive glow to the screen edges.
 using System;
 using System.Drawing;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading.Tasks;
 using System.Runtime.InteropServices;
 using System.Reflection;
 using System.Windows.Forms;
@@ -20,6 +21,9 @@ public sealed class CapriBezelLed : ICapriMod
     private object owner, groove, clock;
     private FieldInfo music;
     private MethodInfo locked;
+    private MethodInfo openTap, readTap;
+    private volatile bool listenBass, stopped;
+    private double bassHit = -10;
     private Timer timer;
     private Edge[] edges;
     private bool enabled = true;
@@ -33,6 +37,9 @@ public sealed class CapriBezelLed : ICapriMod
     private List<Control> scrolled;
     private MethodInfo closeGaps;
     private double strength;
+    private Task<int[][]> rendering;
+    private Rectangle renderArea;
+    private int[][] buffers = new int[4][];
     private System.Diagnostics.Stopwatch time;
 
     public void Start(ICapriHost capri)
@@ -54,15 +61,24 @@ public sealed class CapriBezelLed : ICapriMod
         timer = new Timer { Interval = 40 };
         timer.Tick += Tick;
         timer.Start();
+        Type tap = type.Assembly.GetType("CapriDesktop.SoundTap", false);
+        if (tap != null)
+        {
+            openTap = tap.GetMethod("Open", BindingFlags.Static | BindingFlags.NonPublic, null, new[] { typeof(bool) }, null);
+            readTap = tap.GetMethod("Read", Private);
+            if (openTap != null && readTap != null && readTap.GetParameters().Length == 4)
+                new System.Threading.Thread(BassLoop) { IsBackground = true, Name = "Music Light bass" }.Start();
+        }
     }
 
     private void Tick(object sender, EventArgs args)
     {
         try
         {
-            SyncToggle();
+
             double now = time.Elapsed.TotalSeconds;
             bool playing = enabled && (bool)music.GetValue(owner);
+            listenBass = playing;
             double target = 0;
             if (playing)
             {
@@ -75,28 +91,73 @@ public sealed class CapriBezelLed : ICapriMod
                 }
                 else target = 0.32 + 0.15 * (1 + Math.Sin(now * 3));
             }
+            if (playing)
+            {
+                double age = now - System.Threading.Volatile.Read(ref bassHit);
+                target = Math.Max(target, .98 * Math.Exp(-Math.Max(0, age) * 10));
+            }
             strength += (target - strength) * (target > strength ? 0.62 : 0.18);
             if (strength < 0.015)
             {
+                if (timer.Interval != 150) timer.Interval = 150;
                 foreach (Edge edge in edges) if (edge.Visible) edge.Hide();
                 return;
             }
-            Rectangle area = Screen.PrimaryScreen.Bounds;
+            if (timer.Interval != 40) timer.Interval = 40;
+            Screen display = Screen.PrimaryScreen;
+            Rectangle area = LightArea(display);
             if (area != screen)
             {
                 screen = area;
-                int w = Math.Max(36, Math.Min(84, area.Height / 17));
+                int w = Math.Max(36, Math.Min(84, display.Bounds.Height / 17));
                 int topGlow = w + w / 2;
                 edges[0].CornerDepth = w;
-                edges[0].Bounds = new Rectangle(area.Left, area.Top, area.Width, topGlow);
-                edges[1].Bounds = new Rectangle(area.Left, area.Bottom - w, area.Width, w);
-                edges[2].Bounds = new Rectangle(area.Left, area.Top + topGlow, w, area.Height - topGlow - w);
-                edges[3].Bounds = new Rectangle(area.Right - w, area.Top + topGlow, w, area.Height - topGlow - w);
+                edges[0].MoveGlow(new Rectangle(area.Left, area.Top, area.Width, topGlow), strength);
+                edges[1].MoveGlow(new Rectangle(area.Left, area.Bottom - w, area.Width, w), strength);
+                edges[2].MoveGlow(new Rectangle(area.Left, area.Top + topGlow, w, area.Height - topGlow - w), strength);
+                edges[3].MoveGlow(new Rectangle(area.Right - w, area.Top + topGlow, w, area.Height - topGlow - w), strength);
             }
-            foreach (Edge edge in edges)
+            if (rendering != null && rendering.IsCompleted)
             {
-                edge.PaintGlow(now * 48, strength);
-                if (!edge.Visible) edge.Show();
+                int[][] ready = rendering.GetAwaiter().GetResult();
+                rendering = null;
+                buffers = ready;
+                if (renderArea == area)
+                {
+                    for (int i = 0; i < edges.Length; i++)
+                    {
+                        edges[i].PresentGlow(ready[i], strength);
+                        if (!edges[i].Visible) edges[i].Show();
+                    }
+                }
+            }
+            if (rendering == null)
+            {
+                int[] widths = new int[4], heights = new int[4], corners = new int[4];
+                for (int i = 0; i < edges.Length; i++)
+                {
+                    widths[i] = edges[i].GlowSize.Width;
+                    heights[i] = edges[i].GlowSize.Height;
+                    corners[i] = edges[i].CornerDepth;
+                }
+                double hue = now * 48;
+                int[][] reuse = buffers;
+                renderArea = area;
+                rendering = Task.Run(delegate
+                {
+                    ProcessorNumber previous;
+                    bool hinted = PreferEfficientCore(0, out previous);
+                    try
+                    {
+                        for (int i = 0; i < 4; i++)
+                            reuse[i] = Edge.BuildGlow(i, widths[i], heights[i], corners[i], hue, reuse[i]);
+                        return reuse;
+                    }
+                    finally
+                    {
+                        if (hinted) SetThreadIdealProcessorEx(GetCurrentThread(), ref previous, IntPtr.Zero);
+                    }
+                });
             }
         }
         catch (Exception error)
@@ -113,6 +174,38 @@ public sealed class CapriBezelLed : ICapriMod
         Enable(command == "bezel on");
         host.Say(enabled ? "Bezel lights on." : "Bezel lights off.");
         return true;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WindowRect { internal int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr FindWindow(string name, string title);
+    [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr window, out WindowRect bounds);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
+
+
+    private Rectangle LightArea(Screen display)
+    {
+        Rectangle bounds = display.Bounds, target = display.WorkingArea;
+        WindowRect front;
+        IntPtr active = GetForegroundWindow();
+        bool full = active != IntPtr.Zero && GetWindowRect(active, out front) &&
+            front.Left <= bounds.Left + 2 && front.Top <= bounds.Top + 2 &&
+            front.Right >= bounds.Right - 2 && front.Bottom >= bounds.Bottom - 2;
+        if (full) target = bounds;
+        else
+        {
+            WindowRect bar;
+            IntPtr taskbar = FindWindow("Shell_TrayWnd", null);
+            if (taskbar != IntPtr.Zero && IsWindowVisible(taskbar) && GetWindowRect(taskbar, out bar) &&
+                bar.Right > bounds.Left && bar.Left < bounds.Right &&
+                bar.Bottom >= bounds.Bottom - 2 && bar.Top > bounds.Top + bounds.Height / 2)
+            {
+                int bottom = Math.Max(bounds.Top + 1, Math.Min(bounds.Bottom, bar.Top));
+                return Rectangle.FromLTRB(target.Left, target.Top, target.Right, bottom);
+            }
+        }
+        return target;
     }
 
     private void Enable(bool value)
@@ -166,36 +259,192 @@ public sealed class CapriBezelLed : ICapriMod
         if (scroll != null) scroll.Invoke(frame, new object[] { toggle });
         else scrolled.Add(toggle);
         checkedProperty.SetValue(toggle, enabled, null);
-        closeGaps.Invoke(frame, null);
-        SyncToggle();
+        hologram.SizeChanged += AnchorSizeChanged;
+        RefreshLayout();
     }
 
-    private void SyncToggle()
+    private void AnchorSizeChanged(object sender, EventArgs args) { ResizeToggle(); }
+
+    private void ResizeToggle()
     {
         if (toggle == null || toggle.IsDisposed || hologram.IsDisposed) return;
-        int step = (int)Math.Round(hologram.Height * 28.0 / 22);
-        toggle.SetBounds(hologram.Left, hologram.Top + step, hologram.Width, hologram.Height);
+        toggle.Size = hologram.Size;
         toggle.Font = hologram.Font;
-        toggle.Visible = hologram.Visible;
-        toggle.TabStop = hologram.TabStop;
     }
 
+    private void RefreshLayout()
+    {
+        if (frame.IsDisposed) return;
+        if (toggle != null) ResizeToggle();
+        Type type = frame.GetType();
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+        FieldInfo offset = type.GetField("pageScroll", flags);
+        MethodInfo move = type.GetMethod("MoveControls", flags);
+        int position = (int)offset.GetValue(frame);
+        if (position != 0) move.Invoke(frame, new object[] { 0 });
+        closeGaps.Invoke(frame, null);
+        type.GetMethod("Place", flags).Invoke(frame, null);
+        if (position != 0) move.Invoke(frame, new object[] { position });
+        frame.Invalidate(true);
+    }
     private void RemoveToggle()
     {
         if (toggle == null) return;
+        hologram.SizeChanged -= AnchorSizeChanged;
         pageRows.RemoveAll(entry => entry.Key == toggle);
         built.Remove(toggle);
         tops.Remove(toggle);
         scrolled.Remove(toggle);
-        foreach (KeyValuePair<Control,int> entry in shifted) built[entry.Key] = entry.Value;
+        foreach (Control row in shifted.Keys)
+            if (built.ContainsKey(row)) built[row] -= 28;
         shifted.Clear();
         toggle.Dispose();
         toggle = null;
-        if (!frame.IsDisposed) closeGaps.Invoke(frame, null);
+        if (!frame.IsDisposed) RefreshLayout();
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ProcessorNumber
+    {
+        public ushort Group;
+        public byte Number;
+        public byte Reserved;
+    }
+
+    [DllImport("kernel32.dll")] private static extern IntPtr GetCurrentThread();
+    [DllImport("kernel32.dll")] private static extern bool GetSystemCpuSetInformation(IntPtr info, uint size, out uint required, IntPtr process, uint flags);
+    [DllImport("kernel32.dll")] private static extern bool SetThreadIdealProcessorEx(IntPtr thread, ref ProcessorNumber processor, IntPtr previous);
+    [DllImport("kernel32.dll", EntryPoint = "SetThreadIdealProcessorEx")]
+    private static extern bool SaveAndSetIdealProcessor(IntPtr thread, ref ProcessorNumber processor, out ProcessorNumber previous);
+
+    private static readonly Lazy<ProcessorNumber[]> EfficientCores = new Lazy<ProcessorNumber[]>(FindEfficientCores);
+
+    private static bool PreferEfficientCore(int worker, out ProcessorNumber previous)
+    {
+        previous = default(ProcessorNumber);
+        var cores = EfficientCores.Value;
+        if (cores.Length == 0) return false;
+        var target = cores[worker % cores.Length];
+        return SaveAndSetIdealProcessor(GetCurrentThread(), ref target, out previous);
+    }
+
+    private static ProcessorNumber[] FindEfficientCores()
+    {
+        var none = new ProcessorNumber[0];
+        try
+        {
+            if (!string.Equals(Microsoft.Win32.Registry.GetValue(
+                @"HKEY_LOCAL_MACHINE\HARDWARE\DESCRIPTION\System\CentralProcessor\0",
+                "VendorIdentifier", null) as string, "GenuineIntel", StringComparison.Ordinal))
+                return none;
+
+            uint size;
+            GetSystemCpuSetInformation(IntPtr.Zero, 0, out size, IntPtr.Zero, 0);
+            if (size == 0 || size > int.MaxValue) return none;
+            var buffer = Marshal.AllocHGlobal((int)size);
+            try
+            {
+                uint used;
+                if (!GetSystemCpuSetInformation(buffer, size, out used, IntPtr.Zero, 0) || used > size)
+                    return none;
+
+                var cores = new List<ProcessorNumber>();
+                int lowest = 256, highest = -1;
+                for (int offset = 0; offset + 8 <= used;)
+                {
+                    var entry = IntPtr.Add(buffer, offset);
+                    int length = Marshal.ReadInt32(entry);
+                    if (length < 8 || length > used - offset) return none;
+                    offset += length;
+                    if (length < 20 || Marshal.ReadInt32(entry, 4) != 0) continue;
+
+                    // SYSTEM_CPU_SET_INFORMATION.CpuSet
+                    int efficiency = Marshal.ReadByte(entry, 18);
+                    highest = Math.Max(highest, efficiency);
+                    if (efficiency > lowest) continue;
+                    if (efficiency < lowest)
+                    {
+                        lowest = efficiency;
+                        cores.Clear();
+                    }
+                    if ((Marshal.ReadByte(entry, 19) & 3) != 0) continue;
+                    cores.Add(new ProcessorNumber
+                    {
+                        Group = unchecked((ushort)Marshal.ReadInt16(entry, 12)),
+                        Number = Marshal.ReadByte(entry, 14)
+                    });
+                }
+                return highest > lowest ? cores.ToArray() : none;
+            }
+            finally { Marshal.FreeHGlobal(buffer); }
+        }
+        catch (Exception) { return none; }
+    }
+
+    private void BassLoop()
+    {
+        ProcessorNumber previousProcessor;
+        PreferEfficientCore(1, out previousProcessor);
+        IDisposable tap = null;
+        double upper = 0, lower = 0, average = 0, previous = 0, last = -10;
+        Action<byte[],long,int> pcm = delegate(byte[] bytes, long timestamp, int rate)
+        {
+            if (rate <= 0 || bytes.Length < 4 || !listenBass || stopped) return;
+            double highStep = 1 - Math.Exp(-2 * Math.PI * 150 * 4 / rate);
+            double lowStep = 1 - Math.Exp(-2 * Math.PI * 35 * 4 / rate);
+            double energy = 0;
+            int count = 0;
+            for (int i = 0; i + 3 < bytes.Length; i += 16)
+            {
+                short left = (short)(bytes[i] | bytes[i + 1] << 8);
+                short right = (short)(bytes[i + 2] | bytes[i + 3] << 8);
+                double sample = (left + right) / 65536.0;
+                upper += highStep * (sample - upper);
+                lower += lowStep * (sample - lower);
+                double band = upper - lower;
+                energy += band * band;
+                count++;
+            }
+            double level = Math.Sqrt(energy / count);
+            double now = time.Elapsed.TotalSeconds;
+            if (level > .012 && level > average * 1.5 && level > previous * 1.12 && now - last > .13)
+            {
+                last = now;
+                System.Threading.Volatile.Write(ref bassHit, now);
+            }
+            average += .035 * (level - average);
+            previous = level;
+        };
+        object[] args = { null, null, 0L, pcm };
+        try
+        {
+            while (!stopped)
+            {
+                if (!listenBass)
+                {
+                    if (tap != null) { tap.Dispose(); tap = null; }
+                    upper = lower = average = previous = 0;
+                    System.Threading.Volatile.Write(ref bassHit, -10);
+                    System.Threading.Thread.Sleep(150);
+                    continue;
+                }
+                if (tap == null)
+                {
+                    tap = openTap.Invoke(null, new object[] { true }) as IDisposable;
+                    if (tap == null) { System.Threading.Thread.Sleep(500); continue; }
+                }
+                if (!(bool)readTap.Invoke(tap, args)) { tap.Dispose(); tap = null; }
+                System.Threading.Thread.Sleep(20);
+            }
+        }
+        catch (Exception error) { host.Log("Music Light bass: " + error.GetBaseException().Message); }
+        finally { if (tap != null) tap.Dispose(); }
     }
 
     public void Stop()
     {
+        stopped = true;
+        listenBass = false;
         if (timer != null) { timer.Stop(); timer.Dispose(); timer = null; }
         if (edges != null) { foreach (Edge edge in edges) edge.Dispose(); edges = null; }
         RemoveToggle();
@@ -274,6 +523,9 @@ internal Edge(int edge)
         [DllImport("user32.dll", SetLastError = true)] private static extern bool UpdateLayeredWindow(IntPtr window, IntPtr screenDc, ref Pair at, ref Pair size, IntPtr sourceDc, ref Pair source, int key, ref Blend blend, int flags);
 
         private IntPtr dc, bitmap, oldBitmap, pixels;
+        private Rectangle glowBounds;
+        private int[] resizeSource, resizeTarget;
+        internal Size GlowSize { get { return glowBounds.IsEmpty ? Size : glowBounds.Size; } }
         private int width, height;
         private int[] data;
 
@@ -304,11 +556,9 @@ internal Edge(int edge)
             data = new int[w * h];
         }
 
-        internal void PaintGlow(double hue, double strength)
+        internal static int[] BuildGlow(int side, int w, int h, int cornerDepth, double hue, int[] data)
         {
-            int w = Width, h = Height;
-            if (w <= 0 || h <= 0) return;
-            Surface(w, h);
+            if (data == null || data.Length != w * h) data = new int[w * h];
             bool horizontal = side < 2;
             bool reverse = side == 1 || side == 2;
             int sequence = side == 0 ? 0 : side == 3 ? 1 : side == 1 ? 2 : 3;
@@ -328,27 +578,90 @@ internal Edge(int edge)
                 alpha[i] = (int)(235 * Math.Exp(-3 * t * t) * (1 - t) * (1 - t));
                 shine[i] = (int)(100 * Math.Exp(-t * 24));
             }
+            int[] cornerAlpha = side == 0 && cornerDepth > 1 ? new int[w] : null;
+            int[] cornerShine = cornerAlpha == null ? null : new int[w];
+            if (horizontal)
+            {
+                int corner = side == 0 ? cornerDepth : depth;
+                Color[] mapped = new Color[w];
+                for (int x = 0; x < w; x++)
+                {
+                    int at = x;
+                    if (x < corner) at = 0;
+                    else if (x >= w - corner) at = w - 1;
+                    else if (w > 2 * corner + 1) at = (x - corner) * (w - 1) / (w - 2 * corner - 1);
+                    mapped[x] = rainbow[at];
+                    if (cornerAlpha == null) continue;
+                    double t = Math.Min(1, Math.Min(x, w - 1 - x) / (double)(cornerDepth - 1));
+                    cornerAlpha[x] = (int)(235 * Math.Exp(-3 * t * t) * (1 - t) * (1 - t));
+                    cornerShine[x] = (int)(100 * Math.Exp(-t * 24));
+                }
+                rainbow = mapped;
+            }
             for (int y = 0; y < h; y++)
             for (int x = 0; x < w; x++)
             {
-                int d = side == 0 ? y : side == 1 ? h - 1 - y : side == 2 ? x : w - 1 - x;
-                if (horizontal && side != 0) d = Math.Min(d, Math.Min(x, w - 1 - x));
+                int d = side == 0 ? y : side == 1 ? Math.Min(h - 1 - y, Math.Min(x, w - 1 - x)) :
+                    side == 2 ? x : w - 1 - x;
                 Color color = rainbow[horizontal ? x : y];
                 int a = alpha[d], white = shine[d];
-                if (side == 0 && CornerDepth > 1)
+                if (cornerAlpha != null)
                 {
-                    double t = Math.Min(1, Math.Min(x, w - 1 - x) / (double)(CornerDepth - 1));
-                    int cornerAlpha = (int)(235 * Math.Exp(-3 * t * t) * (1 - t) * (1 - t));
-                    a = Math.Max(a, cornerAlpha);
-                    white = Math.Max(white, (int)(100 * Math.Exp(-t * 24)));
+                    a = Math.Max(a, cornerAlpha[x]);
+                    white = Math.Max(white, cornerShine[x]);
                 }
                 int red = (color.R + (255 - color.R) * white / 255) * a / 255;
                 int green = (color.G + (255 - color.G) * white / 255) * a / 255;
                 int blue = (color.B + (255 - color.B) * white / 255) * a / 255;
                 data[y * w + x] = (a << 24) | (red << 16) | (green << 8) | blue;
             }
-            Marshal.Copy(data, 0, pixels, data.Length);
-            Pair at = new Pair(Left, Top), size = new Pair(w, h), origin = new Pair();
+            return data;
+        }
+
+        internal void PresentGlow(int[] data, double strength)
+        {
+            int w = GlowSize.Width, h = GlowSize.Height;
+            if (w < 1 || h < 1 || data.Length != w * h) return;
+            Surface(w, h);
+            Marshal.Copy(data, 0, pixels, w * h);
+            ShowSurface(glowBounds.IsEmpty ? Location : glowBounds.Location, strength);
+        }
+
+        internal void MoveGlow(Rectangle bounds, double strength)
+        {
+            glowBounds = bounds;
+            if (!Visible || data == null || bounds.Width < 1 || bounds.Height < 1)
+            {
+                Bounds = bounds;
+                return;
+            }
+            if (width != bounds.Width || height != bounds.Height)
+            {
+                int oldWidth = width, oldHeight = height;
+                int w = bounds.Width, h = bounds.Height;
+                if (resizeSource == null || resizeSource.Length < oldWidth * oldHeight)
+                    resizeSource = new int[oldWidth * oldHeight];
+                if (resizeTarget == null || resizeTarget.Length < w * h)
+                    resizeTarget = new int[w * h];
+                Marshal.Copy(pixels, resizeSource, 0, oldWidth * oldHeight);
+                for (int y = 0; y < h; y++)
+                {
+                    int oldRow = y * (oldHeight - 1) / Math.Max(1, h - 1) * oldWidth;
+                    int row = y * w;
+                    if (w == oldWidth) Array.Copy(resizeSource, oldRow, resizeTarget, row, w);
+                    else
+                        for (int x = 0; x < w; x++)
+                            resizeTarget[row + x] = resizeSource[oldRow + x * (oldWidth - 1) / Math.Max(1, w - 1)];
+                }
+                Surface(w, h);
+                Marshal.Copy(resizeTarget, 0, pixels, w * h);
+            }
+            ShowSurface(bounds.Location, strength);
+        }
+
+        private void ShowSurface(Point position, double strength)
+        {
+            Pair at = new Pair(position.X, position.Y), size = new Pair(width, height), origin = new Pair();
             Blend blend = new Blend { Opacity = (byte)(255 * strength), AlphaFormat = 1 };
             if (!UpdateLayeredWindow(Handle, IntPtr.Zero, ref at, ref size, dc, ref origin, 0, ref blend, 2))
                 throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
