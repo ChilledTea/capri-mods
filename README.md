@@ -1,26 +1,47 @@
-# Capri mods
+# Capri Bezel LED
 
-Mods for [Capri](https://github.com/lachydotmcg/capri-desktop), the desktop companion. Find one you like, or share your own.
+![Capri Bezel LED preview](preview.png)
 
-Every mod is checked for malware before it goes up here.
+Music Light adds a diffuse, moving RGB glow around your primary display. It pulses to music, with an extra brightness boost on detected bass hits. The overlay fades inward and lets mouse clicks pass through.
 
-## Kinds of mod
-- **Settings mods** (`.capri-mod`): extra names, colours and other settings. In Capri 0.8.5 or newer, a mod that only changes her colours shows under Skins.
-- **Code mods** (`.capri-code`): C# that Capri compiles and runs. Code mods can do anything on your PC, so Capri asks before running one.
-- **Skins** (`.capri-skin`): a zip of pictures that replace her art.
-- **Skills** (`.capri-skill`): know-how for a game, like what to build and when. Capri follows it whenever she plays that game. Skills need Capri 0.8.4 or newer.
+## Installation
 
-## Using a mod
-In Capri 0.8.3 or newer, open Capri Mainframe and press Mods in the CAPRI band. Browse mods lists everything here with previews, downloads and ratings, and Install puts a mod in and turns it on. You can also download a mod file from here and use Import mod.
+1. Download [capri-bezel-led.capri-code](capri-bezel-led.capri-code).
+2. Open **Mainframe → CAPRI → Mods → Import mod** and select the file.
+3. Approve the code mod when prompted.
+4. Use **Mainframe → Settings → Capri → Music Light** to enable or disable the effect.
 
-## Sharing a mod
-1. Fork this repo.
-2. Add a folder under `mods/` named after your mod. Put in the mod file and a short `README.md` that says what it does. Your GitHub username goes on it as the author. Add a `- Made by:` line if you'd like a different name.
-3. Add a picture called `preview.png`, around 16:9, if you have one. That picture is what people see in Capri's mods window. Mods without one get a default picture.
-4. Open a pull request.
+## Changelog
 
-## Stay safe
-- Only install mods from here, or from people you trust.
-- Only get Capri itself from [capriai.app](https://capriai.app) or [its GitHub](https://github.com/lachydotmcg/capri-desktop/releases).
+### v7.0.1
 
-Questions? Ask on the [Capri Discord](https://discord.gg/capridesktop).
+Fixes Mainframe GUI glitches.
+This is the Final Build and done.
+Future Fixed for Capri will be provided in case the Mod needs patches for newer Capri versions in the Future.
+
+### v0.6.1
+
+- The render and bass workers prefer E-cores on supported Intel hybrid CPUs. Windows can still schedule them on other cores.
+- On AMD and systems without detected Intel E-cores, Windows continues to choose where the workers run.
+- Added bass-reactive flashes using Windows playback audio. Bass detection runs in the background while Capri detects music.
+- Kept the diffuse RGB renderer and existing fullscreen and taskbar behavior.
+
+### Changes since v0.5.2
+
+- Moved RGB pixel rendering off Capri's UI thread and reused pixel buffers. The renderer now calculates corner and color values per column, and the mod checks less often when idle.
+- Registered the Music Light row with the Mainframe settings layout so it scrolls with the other controls.
+- The glow follows the desktop work area and extends to the monitor edges in fullscreen. Cached strips resize together when switching modes to keep the bottom corners joined.
+
+### v0.5.2
+
+- Initial public release.
+
+## Compatibility
+
+Windows code mod for [Capri Desktop](https://github.com/lachydotmcg/capri-desktop). The mod uses internal Capri interfaces for music detection, audio capture, and Mainframe controls. Future Capri releases may require an update.
+
+## Credits
+
+- Made by: Dominik20074
+- AI assisted with the code and preview artwork.
+
