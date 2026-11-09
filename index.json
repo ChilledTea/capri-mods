@@ -66,6 +66,14 @@
       "about": "Capri Bezel LED adds a music-reactive rainbow glow around the edges of your primary display. Colors travel around the screen and blend through the corners. The light fades into transparency toward the center, and mouse clicks pass through the overlay."
     },
     {
+      "folder": "capri-night-city",
+      "file": "capri-night-city.capri-code",
+      "name": "Capri Night City",
+      "kind": "code",
+      "author": "NoxEterna",
+      "about": "Connect Capri to Cyberpunk 2077 for nearby/group hacks, native scanner tags, vehicles and devices, eight custom netrunner programs, Protect Me, stealth and optional chaos."
+    },
+    {
       "folder": "cat-ears",
       "file": "cat-ears.capri-skin",
       "name": "Cat Ears",
@@ -456,6 +464,14 @@
       "kind": "code",
       "author": "Mirit0",
       "about": "Emoji Pack : Travel & Places 1"
+    },
+    {
+      "folder": "mute-button",
+      "file": "mute-button.capri-code",
+      "name": "Mute Button",
+      "kind": "code",
+      "author": "Potato",
+      "about": "A mute button next to TYPE and TALK that silences Capri's voice instantly."
     },
     {
       "folder": "neon-sign",
