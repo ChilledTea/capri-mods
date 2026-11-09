@@ -20,3 +20,4 @@ No git needed: fill in the [Submit a mod](https://github.com/lachydotmcg/capri-m
 - Only install mods from here, or from people you trust.
 - Only get Capri itself from [capriai.app](https://capriai.app) or [its GitHub](https://github.com/lachydotmcg/capri-desktop/releases).
 
+- Made by: Dominik20074

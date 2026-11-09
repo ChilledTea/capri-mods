@@ -63,7 +63,7 @@
       "name": "Capri Bezel LED",
       "kind": "code",
       "author": "Dominik20074",
-      "about": "Capri Bezel LED adds a music-reactive rainbow glow around the edges of your primary display. Colors travel around the screen and blend through the corners. The light fades into transparency toward the center, and mouse clicks pass through the overlay."
+      "about": "Music Light adds a diffuse, moving RGB glow around your primary display. It pulses to music, with an extra brightness boost on detected bass hits. The overlay fades inward and lets mouse clicks pass through."
     },
     {
       "folder": "capri-night-city",
