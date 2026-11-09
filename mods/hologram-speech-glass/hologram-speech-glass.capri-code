@@ -1,7 +1,7 @@
 // capri-mod: 1
 // id: hologram-speech-glass
 // name: Hologram Speech Glass
-// version: 0.1.4
+// version: 0.1.10
 // author: Dominik20074
 // description: Makes Capri's speech bubble translucent in Hologram mode.
 using System;
@@ -24,8 +24,8 @@ public sealed class HologramSpeechGlass : ICapriMod
     private Action<IntPtr, Bitmap, Point> draw;
     private Timer timer;
     private bool enabled = true;
-    private Control frame, toggle, hologram, musicLight;
-    private bool placingMusic;
+    private Control frame, toggle, hologram;
+
     private PropertyInfo checkedProperty;
     private string settings;
     private readonly Dictionary<Control,int> shifted = new Dictionary<Control,int>();
@@ -33,7 +33,9 @@ public sealed class HologramSpeechGlass : ICapriMod
     private Dictionary<Control,int> built, tops;
     private List<Control> scrolled;
     private MethodInfo closeGaps;
-    private Bitmap last;
+    private Bitmap last, translucent;
+    private Graphics graphics;
+    private ImageAttributes attributes;
     private IntPtr lastHandle;
     private Point lastLocation;
 
@@ -59,10 +61,20 @@ public sealed class HologramSpeechGlass : ICapriMod
         settings = Path.Combine(host.Folder, "enabled.txt");
         if (File.Exists(settings)) enabled = File.ReadAllText(settings).Trim() != "off";
         AddToggle();
-        Application.Idle += Tick;
-        timer = new Timer { Interval = 10 };
+
+        timer = new Timer { Interval = 500 };
         timer.Tick += Tick;
-        timer.Start();
+        bubble.VisibleChanged += BubbleStateChanged;
+        bubble.HandleCreated += BubbleStateChanged;
+        bubble.HandleDestroyed += BubbleStateChanged;
+        UpdatePolling();
+        if (toggle != null)
+        {
+
+            hologram.SizeChanged += LayoutChanged;
+            frame.ControlAdded += RowsChanged;
+            frame.ControlRemoved += RowsChanged;
+        }
     }
 
     [DllImport("dwmapi.dll")]
@@ -80,17 +92,44 @@ public sealed class HologramSpeechGlass : ICapriMod
         }
         if (mirror != null) mirror.Hide();
         last = null;
+        ReleaseSurface();
+    }
+
+    private void ReleaseSurface()
+    {
+        if (graphics != null) { graphics.Dispose(); graphics = null; }
+        if (attributes != null) { attributes.Dispose(); attributes = null; }
+        if (translucent != null) { translucent.Dispose(); translucent = null; }
+    }
+
+    private void BubbleStateChanged(object sender, EventArgs args) { UpdatePolling(); }
+
+    private void UpdatePolling()
+    {
+        if (timer == null) return;
+        if (enabled && !bubble.IsDisposed && bubble.Visible && bubble.IsHandleCreated)
+        {
+            if (!timer.Enabled) Tick(timer, EventArgs.Empty);
+            if (timer != null) timer.Start();
+        }
+        else
+        {
+            timer.Stop();
+            Restore();
+        }
     }
 
     private void Tick(object sender, EventArgs args)
     {
         try
         {
-            SyncToggle();
-            if (!enabled || bubble.IsDisposed || !bubble.Visible || !bubble.IsHandleCreated ||
-                !(bool)hologramState.GetValue(owner, null))
+            bool active = enabled && !bubble.IsDisposed && bubble.Visible && bubble.IsHandleCreated &&
+                (bool)hologramState.GetValue(owner, null);
+            int interval = active ? 50 : 500;
+            if (timer.Interval != interval) timer.Interval = interval;
+            if (!active)
             {
-                Restore();
+                if (lastHandle != IntPtr.Zero) Restore();
                 return;
             }
             Bitmap original = image.GetValue(bubble, null) as Bitmap;
@@ -107,15 +146,21 @@ public sealed class HologramSpeechGlass : ICapriMod
             }
             if (mirror == null) mirror = new Mirror();
             mirror.Bounds = new Rectangle(at, original.Size);
-            using (Bitmap translucent = new Bitmap(original.Width, original.Height, PixelFormat.Format32bppPArgb))
-            using (Graphics graphics = Graphics.FromImage(translucent))
-            using (ImageAttributes attributes = new ImageAttributes())
+            if (last != original)
             {
-                attributes.SetColorMatrix(new ColorMatrix { Matrix33 = 0.63f });
+                if (translucent == null || translucent.Size != original.Size)
+                {
+                    ReleaseSurface();
+                    translucent = new Bitmap(original.Width, original.Height, PixelFormat.Format32bppPArgb);
+                    graphics = Graphics.FromImage(translucent);
+                    graphics.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
+                    attributes = new ImageAttributes();
+                    attributes.SetColorMatrix(new ColorMatrix { Matrix33 = 0.63f });
+                }
                 graphics.DrawImage(original, new Rectangle(Point.Empty, original.Size), 0, 0,
                     original.Width, original.Height, GraphicsUnit.Pixel, attributes);
-                draw(mirror.Handle, translucent, at);
             }
+            draw(mirror.Handle, translucent, at);
             if (!mirror.Visible) mirror.Show();
             last = original;
             lastLocation = at;
@@ -132,6 +177,7 @@ public sealed class HologramSpeechGlass : ICapriMod
     private void Enable(bool value)
     {
         enabled = value;
+        UpdatePolling();
         if (toggle != null && (bool)checkedProperty.GetValue(toggle, null) != value)
             checkedProperty.SetValue(toggle, value, null);
         try { File.WriteAllText(settings, value ? "on" : "off"); }
@@ -169,7 +215,7 @@ public sealed class HologramSpeechGlass : ICapriMod
         foreach (KeyValuePair<Control,int> entry in pageRows)
         {
             int y;
-            if (entry.Value < column || !built.TryGetValue(entry.Key, out y) || y <= anchorTop) continue;
+            if (entry.Key.Text == "Music Light" || entry.Value < column || !built.TryGetValue(entry.Key, out y) || y <= anchorTop) continue;
             shifted.Add(entry.Key, y);
             built[entry.Key] = y + 28;
         }
@@ -180,45 +226,51 @@ public sealed class HologramSpeechGlass : ICapriMod
         if (scroll != null) scroll.Invoke(frame, new object[] { toggle });
         else scrolled.Add(toggle);
         checkedProperty.SetValue(toggle, enabled, null);
-        closeGaps.Invoke(frame, null);
-        SyncToggle();
+        RefreshLayout();
     }
 
-    private void SyncToggle()
+    private void LayoutChanged(object sender, EventArgs args) { ResizeToggle(); }
+
+    private void RowsChanged(object sender, ControlEventArgs args)
+    {
+        if (args.Control.Text != "Music Light" || frame.IsDisposed || !frame.IsHandleCreated) return;
+        frame.BeginInvoke(new MethodInvoker(RefreshLayout));
+    }
+
+    private void ResizeToggle()
     {
         if (toggle == null || toggle.IsDisposed || hologram.IsDisposed) return;
-        int step = (int)Math.Round(hologram.Height * 28.0 / 22);
-        toggle.SetBounds(hologram.Left, hologram.Top + step, hologram.Width, hologram.Height);
+        toggle.Size = hologram.Size;
         toggle.Font = hologram.Font;
-        toggle.Visible = hologram.Visible;
-        toggle.TabStop = hologram.TabStop;
-        Control light = pageRows.Find(entry => entry.Key.Text == "Music Light").Key;
-        if (light != musicLight)
-        {
-            if (musicLight != null) musicLight.LocationChanged -= PlaceMusicLight;
-            musicLight = light;
-            if (musicLight != null) musicLight.LocationChanged += PlaceMusicLight;
-        }
-        PlaceMusicLight(null, EventArgs.Empty);
     }
 
-    private void PlaceMusicLight(object sender, EventArgs args)
+    private void RefreshLayout()
     {
-        if (placingMusic || toggle == null || musicLight == null || musicLight.IsDisposed) return;
-        placingMusic = true;
-        try
+        if (frame.IsDisposed) return;
+        if (toggle != null)
         {
-            int step = toggle.Top - hologram.Top;
-            int top = toggle.Top + step;
-            if (musicLight.Top != top) musicLight.Top = top;
+        Control light = pageRows.Find(entry => entry.Key.Text == "Music Light").Key;
+        built[toggle] = built[hologram] + (light == null ? 28 : 56);
+            ResizeToggle();
         }
-        finally { placingMusic = false; }
+        Type type = frame.GetType();
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+        FieldInfo offset = type.GetField("pageScroll", flags);
+        MethodInfo move = type.GetMethod("MoveControls", flags);
+        int position = (int)offset.GetValue(frame);
+        if (position != 0) move.Invoke(frame, new object[] { 0 });
+        closeGaps.Invoke(frame, null);
+        type.GetMethod("Place", flags).Invoke(frame, null);
+        if (position != 0) move.Invoke(frame, new object[] { position });
+        frame.Invalidate(true);
     }
-
     private void RemoveToggle()
     {
         if (toggle == null) return;
-        if (musicLight != null) { musicLight.LocationChanged -= PlaceMusicLight; musicLight = null; }
+
+        hologram.SizeChanged -= LayoutChanged;
+        frame.ControlAdded -= RowsChanged;
+        frame.ControlRemoved -= RowsChanged;
         pageRows.RemoveAll(entry => entry.Key == toggle);
         built.Remove(toggle);
         tops.Remove(toggle);
@@ -228,14 +280,23 @@ public sealed class HologramSpeechGlass : ICapriMod
         shifted.Clear();
         toggle.Dispose();
         toggle = null;
-        if (!frame.IsDisposed) closeGaps.Invoke(frame, null);
+        if (!frame.IsDisposed) RefreshLayout();
     }
 
     public void Stop()
     {
-        Application.Idle -= Tick;
+
         RemoveToggle();
-        if (timer != null) { timer.Stop(); timer.Tick -= Tick; timer.Dispose(); timer = null; }
+        if (timer != null)
+        {
+            bubble.VisibleChanged -= BubbleStateChanged;
+            bubble.HandleCreated -= BubbleStateChanged;
+            bubble.HandleDestroyed -= BubbleStateChanged;
+            timer.Stop();
+            timer.Tick -= Tick;
+            timer.Dispose();
+            timer = null;
+        }
         Restore();
         if (mirror != null) { mirror.Dispose(); mirror = null; }
     }
