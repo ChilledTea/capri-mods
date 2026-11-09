@@ -1,0 +1,253 @@
+// capri-mod: 1
+// id: mute-button
+// name: Mute Button
+// version: 1.2.1
+// author: Potato
+// description: Adds a mute button left of TYPE and TALK, mirroring the mic button. One click silences her voice instantly, even mid-sentence, and her bubbles still show. Click again to hear her.
+using System;
+using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Windows.Forms;
+using CapriDesktop;
+
+public class MuteButton : ICapriMod
+{
+    const BindingFlags Any = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static;
+    public const int Side = 40, Gap = 4;
+
+    sealed class Hook : NativeWindow
+    {
+        public Action Moved;
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == 0x02E0 && Moved == null) return;
+            base.WndProc(ref m);
+            if (m.Msg == 0x47 && Moved != null) Moved();
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct Rect { public int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr window, out Rect rect);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
+
+    public static Rectangle Real(Form form)
+    {
+        Rect r;
+        if (!form.IsHandleCreated || !GetWindowRect(form.Handle, out r)) return form.Bounds;
+        return Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom);
+    }
+
+    ICapriHost capri;
+    Form window, pill, button;
+    FieldInfo pillUntil, loudness, pillCentre, pillScale;
+    PropertyInfo chatting;
+    Hook watch, still;
+    Stopwatch clock;
+    MethodInfo talkScale, present, plate, clear;
+    object[] speakers;
+    object gate;
+    Color pink, cyan, red, ink, dim;
+    System.Windows.Forms.Timer timer;
+    bool muted, hover;
+    int volume = 100;
+    float drawnScale = -1;
+    bool drawnHover, drawnMuted;
+
+    public bool Muted { get { return muted; } }
+    public Form Button { get { return button; } }
+
+    public void Start(ICapriHost host)
+    {
+        capri = host;
+        try
+        {
+            window = (Form)host.GetType().GetField("capri", Any).GetValue(host);
+            Assembly app = typeof(ICapriMod).Assembly;
+            Type pillType = app.GetType("CapriDesktop.TalkPill"), look = app.GetType("CapriDesktop.Look");
+            Type overlay = app.GetType("CapriDesktop.Overlay"), voiceType = app.GetType("CapriDesktop.Voice");
+            pill = (Form)Field(window.GetType(), "pill").GetValue(window);
+            pillUntil = Field(window.GetType(), "pillUntil");
+            clock = (Stopwatch)Field(window.GetType(), "clock").GetValue(window);
+            talkScale = Need(window.GetType().GetMethod("TalkScale", Any, null, Type.EmptyTypes, null), "TalkScale");
+            loudness = Field(voiceType, "Loudness");
+            object voice = Field(window.GetType(), "voice").GetValue(window);
+            speakers = new[] { Field(window.GetType(), "speaker").GetValue(window), Field(voiceType, "player").GetValue(voice) };
+            clear = Need(app.GetType("CapriDesktop.Speaker").GetMethod("Clear", Any, null, Type.EmptyTypes, null), "Speaker.Clear");
+            gate = Field(app.GetType("CapriDesktop.PcEars"), "VoiceGate").GetValue(null);
+            plate = Need(pillType.GetMethod("Plate", Any), "TalkPill.Plate");
+            pillCentre = Field(pillType, "centre");
+            pillScale = Field(pillType, "scale");
+            chatting = Need(pillType.GetProperty("Chatting", Any), "TalkPill.Chatting");
+            pink = (Color)Field(look, "Pink").GetValue(null);
+            cyan = (Color)Field(look, "Cyan").GetValue(null);
+            red = (Color)Field(look, "Red").GetValue(null);
+            ink = (Color)Field(look, "Ink").GetValue(null);
+            dim = (Color)Field(look, "Dim").GetValue(null);
+            present = Need(overlay.GetMethod("Present", Any), "Overlay.Present");
+            Cursor pointer = (Cursor)look.GetProperty("Pointer", Any).GetValue(null, null);
+            OnUi(delegate
+            {
+                button = (Form)Activator.CreateInstance(overlay, Any, null, new object[] { "Mute Capri" }, null);
+                button.Cursor = pointer;
+                button.Owner = window;
+                button.MouseUp += delegate(object sender, MouseEventArgs e) { if (e.Button == MouseButtons.Left) Toggle(); };
+                still = new Hook();
+                still.AssignHandle(button.Handle);
+                timer = new System.Windows.Forms.Timer { Interval = 15 };
+                timer.Tick += delegate { Follow(); };
+                timer.Start();
+            });
+        }
+        catch (Exception error) { host.Log("Mute Button couldn't hook into Capri: " + error.Message); }
+    }
+
+    public bool Heard(string words) { return false; }
+
+    public void Stop()
+    {
+        OnUi(delegate
+        {
+            if (timer != null) timer.Dispose();
+            timer = null;
+            if (watch != null) { watch.Moved = null; watch.ReleaseHandle(); watch = null; }
+            if (still != null) { still.ReleaseHandle(); still = null; }
+            if (muted) { muted = false; loudness.SetValue(null, volume); }
+            if (button != null) button.Dispose();
+            button = null;
+        });
+    }
+
+    public void Toggle()
+    {
+        if (loudness == null) return;
+        if (!muted)
+        {
+            volume = (int)loudness.GetValue(null);
+            muted = true;
+            loudness.SetValue(null, 0);
+            ThreadPool.QueueUserWorkItem(delegate { Cut(); });
+        }
+        else
+        {
+            muted = false;
+            loudness.SetValue(null, volume);
+        }
+        Follow();
+    }
+
+    void Cut()
+    {
+        try { lock (gate) foreach (object speaker in speakers) if (speaker != null) clear.Invoke(speaker, null); }
+        catch (Exception error) { capri.Log("Mute Button couldn't cut her line: " + error.Message); }
+    }
+
+    bool Showing() { return pill.IsHandleCreated && pill.Visible && IsWindowVisible(pill.Handle); }
+
+    float Scale()
+    {
+        float s = (float)pillScale.GetValue(pill);
+        return s >= 0.5f && s <= 8 ? s : (float)talkScale.Invoke(window, null);
+    }
+
+    public static Rectangle Spot(float s, Point c, bool chat)
+    {
+        Size size = Measure(s);
+        int gap = (int)Math.Round(Gap * s), wide = (int)Math.Round(100 * s), pillLeft = c.X - wide / 2;
+        Rectangle at = new Rectangle(new Point(pillLeft - gap - size.Width, c.Y), size);
+        if (at.Left < Screen.FromPoint(c).WorkingArea.Left)
+            at.X = pillLeft + wide + gap + (chat ? (int)Math.Round(40 * s) + gap : 0);
+        return at;
+    }
+
+    public void Follow()
+    {
+        if (button == null || button.IsDisposed) return;
+        if (pill.IsHandleCreated && (watch == null || watch.Handle != pill.Handle))
+        {
+            if (watch != null) watch.ReleaseHandle();
+            watch = new Hook { Moved = Follow };
+            watch.AssignHandle(pill.Handle);
+        }
+        if (muted && (int)loudness.GetValue(null) != 0) { muted = false; volume = (int)loudness.GetValue(null); }
+        if (!Showing()) { if (button.Visible) button.Hide(); hover = false; return; }
+        float s = Scale();
+        Rectangle want = Spot(s, (Point)pillCentre.GetValue(pill), (bool)chatting.GetValue(pill, null));
+        Point cursor = Cursor.Position;
+        hover = button.Visible && want.Contains(cursor) && Body(s).Contains(new Point(cursor.X - want.X, cursor.Y - want.Y));
+        if (hover) pillUntil.SetValue(window, Math.Max((double)pillUntil.GetValue(window), clock.Elapsed.TotalSeconds + 1.5));
+        if (button.Visible && Real(button) == want && s == drawnScale && hover == drawnHover && muted == drawnMuted) return;
+        drawnScale = s; drawnHover = hover; drawnMuted = muted;
+        present.Invoke(button, new object[] { Render(s, hover, muted), want.Location });
+    }
+
+    public static Size Measure(float s) { int side = (int)Math.Round(Side * s); return new Size(side, side); }
+
+    public static Rectangle Body(float s)
+    {
+        Size size = Measure(Math.Max(s, 0.1f));
+        int margin = (int)Math.Round(3 * s);
+        return new Rectangle(margin, margin, size.Width - margin * 2, size.Height - margin * 2);
+    }
+
+    public Bitmap Render(float s, bool lit, bool off)
+    {
+        Size size = Measure(s);
+        Bitmap image = new Bitmap(size.Width, size.Height, PixelFormat.Format32bppPArgb);
+        using (Graphics g = Graphics.FromImage(image))
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            Rectangle body = Body(s);
+            Color edge = off ? red : cyan;
+            plate.Invoke(null, new object[] { g, body, s, lit ? body : Rectangle.Empty, edge, edge });
+            DrawSpeaker(g, new PointF(body.Left + body.Width / 2f - 8.5f * s, body.Top + body.Height / 2f), s, lit ? cyan : off ? dim : ink, off);
+        }
+        return image;
+    }
+
+    void DrawSpeaker(Graphics g, PointF at, float s, Color colour, bool off)
+    {
+        float x = at.X, y = at.Y;
+        using (Brush brush = new SolidBrush(colour))
+            g.FillPolygon(brush, new[] { new PointF(x, y - 2.5f * s), new PointF(x + 3 * s, y - 2.5f * s), new PointF(x + 7 * s, y - 6 * s), new PointF(x + 7 * s, y + 6 * s), new PointF(x + 3 * s, y + 2.5f * s), new PointF(x, y + 2.5f * s) });
+        using (Pen pen = new Pen(off ? red : colour, 1.8f * s))
+        {
+            pen.StartCap = pen.EndCap = LineCap.Round;
+            if (off)
+            {
+                g.DrawLine(pen, x + 10.5f * s, y - 3.5f * s, x + 17 * s, y + 3.5f * s);
+                g.DrawLine(pen, x + 17 * s, y - 3.5f * s, x + 10.5f * s, y + 3.5f * s);
+            }
+            else
+            {
+                g.DrawArc(pen, x + 4 * s, y - 4 * s, 8 * s, 8 * s, -50, 100);
+                g.DrawArc(pen, x + 3 * s, y - 7 * s, 14 * s, 14 * s, -50, 100);
+            }
+        }
+    }
+
+    void OnUi(Action work)
+    {
+        Action safe = delegate
+        {
+            try { work(); }
+            catch (Exception error) { capri.Log("Mute Button: " + error.Message); }
+        };
+        try { if (window != null && window.IsHandleCreated && !window.IsDisposed && window.InvokeRequired) window.BeginInvoke(safe); else safe(); }
+        catch (InvalidOperationException) { safe(); }
+    }
+
+    static FieldInfo Field(Type type, string name) { return Need(type.GetField(name, Any), type.Name + "." + name); }
+
+    static T Need<T>(T found, string name) where T : class
+    {
+        if (found == null) throw new MissingMemberException(name + " is missing from this Capri version");
+        return found;
+    }
+}
