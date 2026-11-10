@@ -21,6 +21,13 @@ To tell when a game is in front, it reads the title and app name of the window i
 
 Version **1.2.1** was tested in-game on Windows with Capri 0.8.5.1. The mod uses internal Capri interfaces for game detection, Hologram mode and the Keybinds entry. Future Capri updates may require a mod update.
 
+## Changelog
+
+### v2.0
+
+- Fixed scrolling for the **Hologram hotkey** row under **Mainframe → Settings → Keys**. The row now moves with the rest of the settings.
+- Future updates will be provided.
+
 ## Credits
 
 - Made by: Dominik20074

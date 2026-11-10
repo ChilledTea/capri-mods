@@ -1,11 +1,12 @@
 // capri-mod: 1
 // id: auto-game-hologram
 // name: Auto Game Hologram
-// version: 1.2.1
+// version: 2.0
 // author: Dominik20074
 // description: Turns hologram on while a game is in front and restores its prior state afterward.
 using System;
 using System.Diagnostics;
+using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -27,6 +28,9 @@ public sealed class AutoGameHologram : ICapriMod
     private int samples;
     private HotkeyWindow hotkey;
     private Control keyRow, anchorRow, keyNote;
+    private List<KeyValuePair<Control,int>> pageRows, underVoice;
+    private Dictionary<Control,int> built, tops;
+    private List<Control> scrolled;
     private string bindingFile;
     private int modifiers = 3;
     private int key = (int)Keys.F8;
@@ -128,7 +132,7 @@ public sealed class AutoGameHologram : ICapriMod
     {
         try
         {
-            SyncKeybindRow();
+
             bool detected = IsGameInFront();
             if (candidate != detected) { candidate = detected; samples = 0; }
             if (samples < 2) samples++;
@@ -178,17 +182,38 @@ public sealed class AutoGameHologram : ICapriMod
             "Hologram hotkey", anchorRow.Left, anchorRow.Bottom, anchorRow.Width, anchorRow.Height, click,
             "Choose a global hotkey to toggle Hologram mode"
         }) as Control;
-        if (keyRow != null) keyRow.AccessibleName = "Hologram hotkey";
+        if (keyRow == null) return;
+        keyRow.AccessibleName = "Hologram hotkey";
+        pageRows = (List<KeyValuePair<Control,int>>)type.GetField("pageLeft", Instance).GetValue(frame);
+        underVoice = (List<KeyValuePair<Control,int>>)type.GetField("underVoice", Instance).GetValue(frame);
+        built = (Dictionary<Control,int>)type.GetField("built", Instance).GetValue(frame);
+        tops = (Dictionary<Control,int>)type.GetField("tops", Instance).GetValue(frame);
+        scrolled = (List<Control>)type.GetField("scrolled", Instance).GetValue(frame);
+        int left = pageRows.Find(row => row.Key == anchorRow).Value;
+        int top = keyNote == null ? built[anchorRow] + 28 : built[keyNote];
+        pageRows.Add(new KeyValuePair<Control,int>(keyRow, left));
+        built[keyRow] = top;
+        underVoice.Add(new KeyValuePair<Control,int>(keyRow, top));
+        int gap = (int)Math.Round(anchorRow.Height * 29.0 / 22);
+        keyRow.SetBounds(anchorRow.Left, keyNote == null ? anchorRow.Top + gap : keyNote.Top, anchorRow.Width, anchorRow.Height);
+        int baseTop;
+        tops[keyRow] = tops.TryGetValue(anchorRow, out baseTop) ? baseTop + gap : keyRow.Top;
+        type.GetMethod("Scrolls", Instance).Invoke(frame, new object[] { keyRow });
+        anchorRow.SizeChanged += KeyRowChanged;
+        if (keyNote != null) keyNote.TextChanged += KeyRowChanged;
         SyncKeybindRow();
     }
+
+    private void KeyRowChanged(object sender, EventArgs args) { SyncKeybindRow(); }
 
     private void SyncKeybindRow()
     {
         if (keyRow == null || keyRow.IsDisposed || anchorRow == null || anchorRow.IsDisposed) return;
         bool noteShown = keyNote != null && !string.IsNullOrEmpty(keyNote.Text);
         keyRow.Visible = anchorRow.Visible && !noteShown;
-        int top = keyNote == null ? anchorRow.Bottom + 4 : keyNote.Top;
-        keyRow.SetBounds(anchorRow.Left, top, anchorRow.Width, anchorRow.Height);
+        keyRow.Size = anchorRow.Size;
+        keyRow.Font = anchorRow.Font;
+        keyRow.TabStop = anchorRow.TabStop;
         string shortcut = ((modifiers & 2) != 0 ? "Ctrl + " : "") +
             ((modifiers & 1) != 0 ? "Alt + " : "") +
             ((modifiers & 4) != 0 ? "Shift + " : "") + ((Keys)key).ToString();
@@ -221,6 +246,7 @@ public sealed class AutoGameHologram : ICapriMod
                 key = (int)e.KeyCode;
                 try { File.WriteAllText(bindingFile, modifiers + "," + key); }
                 catch (IOException error) { host.Log("Could not save hotkey: " + error.Message); }
+    
                 SyncKeybindRow();
                 form.Close();
             };
@@ -311,7 +337,18 @@ public sealed class AutoGameHologram : ICapriMod
             timer.Dispose();
             timer = null;
         }
-        if (keyRow != null) { keyRow.Dispose(); keyRow = null; }
+        if (keyRow != null)
+        {
+            anchorRow.SizeChanged -= KeyRowChanged;
+            if (keyNote != null) keyNote.TextChanged -= KeyRowChanged;
+            if (pageRows != null) pageRows.RemoveAll(row => row.Key == keyRow);
+            if (underVoice != null) underVoice.RemoveAll(row => row.Key == keyRow);
+            if (built != null) built.Remove(keyRow);
+            if (tops != null) tops.Remove(keyRow);
+            if (scrolled != null) scrolled.Remove(keyRow);
+            keyRow.Dispose();
+            keyRow = null;
+        }
         if (hotkey != null) { hotkey.Dispose(); hotkey = null; }
         try { Restore(); }
         catch (Exception error) { host.Log("Could not restore hologram: " + error.GetBaseException().Message); }
