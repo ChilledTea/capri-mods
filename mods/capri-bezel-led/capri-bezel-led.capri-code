@@ -1,7 +1,7 @@
 // capri-mod: 1
 // id: capri-bezel-led
 // name: Capri Bezel LED
-// version: 0.6.1
+// version: 7.0.1
 // author: Dominik20074
 // description: Adds a music reactive glow to the screen edges.
 using System;
@@ -238,9 +238,12 @@ public sealed class CapriBezelLed : ICapriMod
         if (pageRows == null || built == null || tops == null || scrolled == null ||
             closeGaps == null || !built.TryGetValue(hologram, out anchorTop)) return;
         int left = pageRows.Find(entry => entry.Key == hologram).Value;
+        Control speech = pageRows.Find(entry => entry.Key.Text == "Speech Glass").Key;
+        if (speech != null && built.ContainsKey(speech)) anchorTop = Math.Max(anchorTop, built[speech]);
         EventHandler change = delegate { if (toggle != null) Enable((bool)checkedProperty.GetValue(toggle, null)); };
-        toggle = make.Invoke(frame, new object[] { "Music Light", left - 28, anchorTop + 25, change }) as Control;
+        toggle = make.Invoke(frame, new object[] { "Music Light\u200B", left - 28, anchorTop + 25, change }) as Control;
         if (toggle == null) return;
+        toggle.AccessibleName = "Music Light";
         checkedProperty = toggle.GetType().GetProperty("Checked", Private);
         if (checkedProperty == null) { toggle.Dispose(); toggle = null; return; }
 
@@ -284,7 +287,7 @@ public sealed class CapriBezelLed : ICapriMod
         if (position != 0) move.Invoke(frame, new object[] { 0 });
         closeGaps.Invoke(frame, null);
         type.GetMethod("Place", flags).Invoke(frame, null);
-        if (position != 0) move.Invoke(frame, new object[] { position });
+        move.Invoke(frame, new object[] { position });
         frame.Invalidate(true);
     }
     private void RemoveToggle()

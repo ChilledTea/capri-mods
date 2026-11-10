@@ -13,11 +13,35 @@ Music Light adds a diffuse, moving RGB glow around your primary display. It puls
 
 ## Changelog
 
-## Submit without git
-No git needed: fill in the [Submit a mod](https://github.com/lachydotmcg/capri-mods/issues/new?template=submit-mod.yml) form and drag your mod file in, zipped first. A pull request gets opened for you, with your GitHub username as the author, and it's read like any other mod before it goes up. To change something, edit your issue.
+### v7.0.1
 
-## Stay safe
-- Only install mods from here, or from people you trust.
-- Only get Capri itself from [capriai.app](https://capriai.app) or [its GitHub](https://github.com/lachydotmcg/capri-desktop/releases).
+Fixes Mainframe GUI glitches.
+This is the Final Build and done.
+Future Fixed for Capri will be provided in case the Mod needs patches for newer Capri versions in the Future.
+
+### v0.6.1
+
+- The render and bass workers prefer E-cores on supported Intel hybrid CPUs. Windows can still schedule them on other cores.
+- On AMD and systems without detected Intel E-cores, Windows continues to choose where the workers run.
+- Added bass-reactive flashes using Windows playback audio. Bass detection runs in the background while Capri detects music.
+- Kept the diffuse RGB renderer and existing fullscreen and taskbar behavior.
+
+### Changes since v0.5.2
+
+- Moved RGB pixel rendering off Capri's UI thread and reused pixel buffers. The renderer now calculates corner and color values per column, and the mod checks less often when idle.
+- Registered the Music Light row with the Mainframe settings layout so it scrolls with the other controls.
+- The glow follows the desktop work area and extends to the monitor edges in fullscreen. Cached strips resize together when switching modes to keep the bottom corners joined.
+
+### v0.5.2
+
+- Initial public release.
+
+## Compatibility
+
+Windows code mod for [Capri Desktop](https://github.com/lachydotmcg/capri-desktop). The mod uses internal Capri interfaces for music detection, audio capture, and Mainframe controls. Future Capri releases may require an update.
+
+## Credits
 
 - Made by: Dominik20074
+- AI assisted with the code and preview artwork.
+
