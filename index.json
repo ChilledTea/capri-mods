@@ -7,7 +7,7 @@
       "name": "MK001 Dice Roller",
       "kind": "code",
       "author": "Mirit0",
-      "about": "Roll animated 3D tabletop dice or flip a coin with Capri. Supports D4, D6, D8, D10, D12, D20 and D100 (two percentile dice), with numbered faces, cyberpunk visuals and playful commentary based on the result."
+      "about": "Roll animated 3D tabletop dice or flip a coin with Capri. Supports D4, D6, D8, D10, D12, D20 and D100 (two percentile dice), with numbered faces, cyberpunk visuals and Natural Commentary (reads her personality, notes, memories, and recent messages)."
     },
     {
       "folder": "MK002-Caprichat",
@@ -64,6 +64,14 @@
       "kind": "code",
       "author": "Dominik20074",
       "about": "Music Light adds a diffuse, moving RGB glow around your primary display. It pulses to music, with an extra brightness boost on detected bass hits. The overlay fades inward and lets mouse clicks pass through."
+    },
+    {
+      "folder": "capri-close-to-tray",
+      "file": "capri-close-to-tray.capri-code",
+      "name": "Capri Close to Tray",
+      "kind": "code",
+      "author": "Dominik20074",
+      "about": "A Windows code mod that lets you close Capri's Mainframe to the system tray."
     },
     {
       "folder": "capri-night-city",
